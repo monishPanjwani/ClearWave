@@ -702,8 +702,8 @@ fn process_audio(
         capture
             .read_exact(&mut bytes)
             .context("Microphone disconnected or capture stream ended")?;
-        for (sample, bytes) in input.iter_mut().zip(bytes.chunks_exact(4)) {
-            *sample = f32::from_le_bytes(bytes.try_into().expect("four-byte chunks"));
+        for (sample, bytes) in input.iter_mut().zip(bytes.as_chunks::<4>().0.iter()) {
+            *sample = f32::from_le_bytes(*bytes);
             if !sample.is_finite() {
                 *sample = 0.0;
             }
@@ -716,7 +716,7 @@ fn process_audio(
         let output_peak = output
             .iter()
             .fold(0.0_f32, |peak, value| peak.max(value.abs()));
-        for (sample, bytes) in output.iter().zip(bytes.chunks_exact_mut(4)) {
+        for (sample, bytes) in output.iter().zip(bytes.as_chunks_mut::<4>().0.iter_mut()) {
             bytes.copy_from_slice(&sample.to_le_bytes());
         }
         playback
@@ -809,8 +809,8 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(output.len(), FRAME * 4);
         assert!(received.try_recv().is_ok());
-        assert!(output.chunks_exact(4).all(|bytes| {
-            let value = f32::from_le_bytes(bytes.try_into().unwrap());
+        assert!(output.as_chunks::<4>().0.iter().all(|bytes| {
+            let value = f32::from_le_bytes(*bytes);
             value.is_finite() && value.abs() <= 1.0
         }));
         let status = telemetry.lock().unwrap();

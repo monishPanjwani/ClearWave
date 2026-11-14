@@ -119,9 +119,7 @@ impl SpeechGate {
         } else {
             self.open = false;
         }
-        let current = *audio;
-        *audio = self.pending;
-        self.pending = current;
+        std::mem::swap(audio, &mut self.pending);
         for sample in audio {
             // A 2 ms attack and 60 ms release avoid abrupt discontinuities/clicks.
             self.gain = if self.open {
