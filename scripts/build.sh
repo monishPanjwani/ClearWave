@@ -29,6 +29,10 @@ case "${1:-gui}" in
 esac
 mkdir -p dist
 cp target/release/clearwave dist/clearwave
+cp LICENSE THIRD_PARTY_NOTICES.md README.md dist/
+./scripts/collect-licenses.py
+mkdir -p dist/licenses/omarchy
+cp licenses/omarchy/LICENSE dist/licenses/omarchy/
 printf 'Built %s/dist/clearwave\n' "$PWD"
 printf 'Launch: ./dist/clearwave\nDiagnose: ./dist/clearwave doctor --json\n'
 

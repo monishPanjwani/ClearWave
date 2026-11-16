@@ -1,0 +1,13 @@
+[Unit]
+Description=ClearWave private audio engine (capture remains opt-in)
+After=pipewire-pulse.service pulseaudio.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/clearwave/clearwave daemon
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

@@ -1,5 +1,3 @@
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
-
 #[cfg(any(target_os = "linux", not(feature = "gui")))]
 use anyhow::bail;
 #[cfg(target_os = "linux")]
@@ -13,7 +11,7 @@ mod ui;
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "Clearwave: private, local microphone cleanup and audio routing"
+    about = "ClearWave: Linux playback enhancement and microphone cleanup"
 )]
 struct Args {
     /// Emit machine-readable JSON (stream commands emit one JSON object per line).
@@ -27,6 +25,13 @@ struct Args {
 enum Command {
     /// Open the desktop interface (also the default).
     Open,
+    /// Run the per-user background engine (never starts capture automatically).
+    Daemon,
+    /// Inspect or control the background engine.
+    Engine {
+        #[command(subcommand)]
+        action: EngineAction,
+    },
     #[cfg(target_os = "linux")]
     /// Check dependencies and audio-server connectivity without recording.
     Doctor,
@@ -71,6 +76,24 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum EngineAction {
+    /// Apply a validated versioned JSON settings file (never starts capture).
+    Configure {
+        file: std::path::PathBuf,
+    },
+    Status,
+    Stop {
+        #[arg(long)]
+        input: bool,
+    },
+    Start {
+        #[arg(long)]
+        input: bool,
+    },
+    Shutdown,
+}
+
 fn main() {
     let json = std::env::args().any(|arg| arg == "--json");
     let args = match Args::try_parse() {
@@ -102,6 +125,20 @@ fn main() {
 
 fn execute(args: Args) -> Result<()> {
     match args.command.unwrap_or(Command::Open) {
+        Command::Daemon => clearwave::engine::run_daemon(),
+        Command::Engine { action } => {
+            use clearwave::engine::{self, Request};
+            let request = match action {
+                EngineAction::Status => Request::Status,
+                EngineAction::Configure { file } => Request::Configure {
+                    config: Box::new(clearwave::settings::Config::load(&file)?),
+                },
+                EngineAction::Start { input } => Request::Start { input },
+                EngineAction::Stop { input } => Request::Stop { input },
+                EngineAction::Shutdown => Request::Shutdown,
+            };
+            print_value(&engine::request(&request)?, args.json)
+        }
         Command::Open => {
             #[cfg(feature = "gui")]
             {

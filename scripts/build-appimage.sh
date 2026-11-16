@@ -4,6 +4,9 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 ./scripts/build.sh
 mkdir -p dist/AppDir/usr/bin dist/AppDir/usr/share/applications
 cp dist/clearwave dist/AppDir/usr/bin/
+mkdir -p dist/AppDir/usr/share/doc/clearwave
+cp LICENSE THIRD_PARTY_NOTICES.md README.md dist/AppDir/usr/share/doc/clearwave/
+cp -R dist/licenses dist/AppDir/usr/share/doc/clearwave/
 cp packaging/clearwave.desktop dist/AppDir/clearwave.desktop
 sed -i 's/Icon=audio-input-microphone/Icon=clearwave/' dist/AppDir/clearwave.desktop
 cp dist/AppDir/clearwave.desktop dist/AppDir/usr/share/applications/

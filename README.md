@@ -1,151 +1,221 @@
-# Clearwave
+# ClearWave — Linux audio, made clearer
 
-A small, local Rust desktop app for microphone cleanup and audio routing, with a Linux CLI for automation. No accounts, cloud processing, audio uploads, or recordings. The desktop interface uses egui; the noise reducer uses RNNoise through `nnnoiseless`.
+ClearWave processes playback and your microphone locally, with an original dark
+interface with live Omarchy colors and a built-in theme menu. Audio stays in memory: no uploads or saved recordings.
+Linux only, using PipeWire-Pulse or PulseAudio. Windows support has been removed.
 
-**Status: Linux release builds locally; automated DSP/backend/CLI checks are available.** Live noise quality still needs listening checks with your microphone. Windows remains experimental and has not been tested on Windows.
+![ClearWave Output](docs/screenshots/output.png)
 
-## What it does
+Screenshot uses generated test endpoints; no real microphone was captured.
 
-- Select and inspect the microphone and output device.
-- Suppress background noise locally, silence residual noise between phrases with a speech-aware gate, then apply up to 18 dB of microphone boost with a peak limiter. The gate is included in “Remove background noise”; it adds 10 ms of lookahead, holds word endings for 200 ms, and fades closed to avoid clicks. Very quiet speech may still be misclassified; disable cleanup to compare.
-- Display live input/output levels and input clipping information while processing.
-- Linux: create a temporary **Clearwave Microphone** for calls, games, and recording apps; adjust system device volume and defaults; optionally monitor through headphones.
-- Windows: process microphone audio into an existing playback device, such as a virtual cable. See the Windows limitations below.
+## Build and run
 
-Processing starts only when you press Start or invoke `run`. Use headphones for monitoring to avoid feedback. Noise reduction is tuned for speech; it cannot remove every sound, repair clipped input, or perform acoustic echo cancellation. If input clips, reduce the microphone's hardware/system gain before adding software boost.
+Use a current stable Rust toolchain (the dependency lockfile is committed), Python
+3 for isolated integration tests, and PulseAudio client tools. On Arch the runtime
+tools are in `libpulse`; on Debian/Ubuntu install `pulseaudio-utils`. A running
+PipeWire-Pulse or PulseAudio desktop session is required. ALSA-only and JACK-only
+sessions are not supported directly. GUI builds require the platform libraries
+for eframe: on Debian/Ubuntu, `libxkbcommon-dev libwayland-dev libgl1-mesa-dev`.
 
-## Copy, build, and run from source
-
-Install Git, stable [Rust](https://rustup.rs/), and the platform dependencies listed below. Then clone the project:
+Install stable Rust from [rustup.rs](https://rustup.rs/). On Debian/Ubuntu, also
+install `build-essential pkg-config` and the GUI libraries listed above.
 
 ```sh
 git clone https://github.com/monishPanjwani/ClearWave.git
 cd ClearWave
+cargo build --locked
+cargo run --locked -- open
+cargo run --locked -- doctor --json
+cargo run --locked -- devices --json
+./scripts/build.sh        # release binary + documentation/license bundle in dist/
+./scripts/build.sh cli    # release CLI without desktop dependencies
 ```
 
-On Linux:
+No build command installs packages, enables services or changes audio defaults.
+Start with low listening volume. The sample limiter prevents processed sample
+overshoot; it cannot guarantee safe listening volume or undo hardware clipping.
 
-```sh
-./scripts/build.sh
-./dist/clearwave
-```
+## Output
 
-On Windows, open PowerShell after installing Visual Studio C++ Build Tools:
+1. Choose physical speakers/headphones, then a preset (Neutral, Music, Movies or
+   Voice), and enable Output. It creates a stereo **ClearWave Output** sink.
+2. Select that sink in your app's audio settings, or use **Advanced → Use processed
+   output by default**. Existing application streams may need explicit selection
+   in your system mixer or an app restart; ClearWave does not forcibly move them.
+3. Adjust the five EQ bands, gain, Bass, Clarity and Stereo width while listening.
+   Gain includes attenuation (-36 to +18 dB). Stereo width 0 is mono, 1 preserves
+   the image, 2 widens side content. Bass/Clarity are broad peaking filters, not
+   reconstructions of FxSound's effects. There is no reverb/ambience control.
 
-```powershell
-.\scripts\build.ps1
-.\dist\clearwave.exe
-```
+Output processing is 48 kHz float stereo. The EQ centers are 80, 250, 1000, 4000
+and 12000 Hz, fixed Q=1, with ±12 dB gain. Optional compression and low cut are in
+Advanced. Compression reduces peaks above its threshold; increase processed gain
+carefully for louder quiet material. Ratio 1:1 disables compression. A linked
+sample-peak limiter is always active (0.98 ceiling); it preserves channel balance
+but is not a true-peak mastering limiter. Ordinary app processing and hardware
+volume still affect the final sound.
 
-## Download or build release packages
+## Input
 
-Download `clearwave.exe` or `Clearwave-x86_64.AppImage` from [GitHub Releases](https://github.com/monishPanjwani/ClearWave/releases). The EXE runs directly on Windows. On Linux:
+Choose a microphone and a preset (Natural, Clear Speech, Warm Voice or Noisy Room),
+then enable Input explicitly. Choose **Clearwave Microphone** in your call app.
+RNNoise cleanup, a speech-confidence gate, five-band EQ, low cut, processed gain,
+compression and limiting run locally. Input/output meters use dBFS and smooth
+visual decay. The clipping count refers to original digital microphone samples;
+lower the microphone's hardware volume in your system mixer if it clips.
+Processed gain is separate and cannot repair clipping that already happened.
 
-```sh
-chmod +x Clearwave-x86_64.AppImage
-./Clearwave-x86_64.AppImage
-```
+Monitoring is off by default. In Advanced, explicitly choose headphones before
+turning on microphone listening; speakers can cause feedback. Changing monitoring
+or device selection restarts only the affected pipeline. Processing parameters
+update live, with smoothed scalar controls and 20 ms crossfades between filter
+banks. Rapid EQ changes coalesce while a transition finishes. RNNoise bypass
+crossfades too. Latency includes 10 ms frame processing, RNNoise/gate delay,
+server buffering and hardware latency; no measured end-to-end latency is claimed.
 
-The AppImage targets x86_64 Linux with glibc 2.35 or newer. It still requires the audio utilities and desktop libraries described below. If FUSE is unavailable, run it with `--appimage-extract-and-run`.
+Both pages expose basic EQ and presets. Edits mark the preset Custom. Reset to
+neutral disables effects and noise cleanup while retaining the safety limiter.
+Save/delete up to 32 original custom input/output presets from Advanced.
 
-To make your own packages, run `./scripts/build-appimage.sh` on x86_64 Linux (requires `curl` and downloads appimagetool), or `.\scripts\build.ps1` on Windows. Outputs go into `dist/`. Push a version tag such as `v0.1.0` to run the GitHub release workflow, which tests and builds both platforms and publishes the binaries with SHA-256 checksums.
+## Background operation and settings
 
-## Build and launch on Linux
+The GUI is a control surface for a separately running engine. Opening it starts
+an **idle** per-user engine and attaches to an existing instance when available.
+Opening the window, starting the daemon, or loading settings never starts capture.
+Output and Input start and stop independently. Closing the window normally stops
+both pipelines and the daemon. Turn on **Keep audio running when this window
+closes** to preserve them; reopening attaches without restarting audio. Explicit
+**Quit / stop background engine** stops both and cleans owned resources even when
+background operation is enabled. Window close waits for the control handshake;
+unresponsive server operations have bounded timeouts, so cleanup can take several
+seconds (the IPC client deadline is 90 seconds). SIGINT/SIGTERM also request cleanup. SIGKILL/power loss cannot guarantee
+cleanup of server modules/defaults; use your audio mixer to choose physical devices
+and unload only the `clearwave_…` modules you identify after a forced termination.
 
-Install a current stable [Rust toolchain](https://rustup.rs/) and a C compiler. GUI builds need the platform's Wayland/X11/OpenGL development libraries. For example, Debian/Ubuntu needs `build-essential pkg-config libxkbcommon-dev libwayland-dev libgl1-mesa-dev`; distro package names may differ.
+Settings are versioned JSON at `$XDG_CONFIG_HOME/clearwave/settings.json` (or
+`~/.config/clearwave/settings.json`). Changes apply live and save atomically after
+500 ms without further edits, and before normal daemon shutdown. Invalid, oversized,
+unknown-version or malformed settings produce a visible warning and safe defaults;
+the original file is retained until an explicit valid configuration edit replaces
+it. Running state is never persisted. A failed save is visible in diagnostics.
 
-At runtime, run under your normal desktop user with **PipeWire plus pipewire-pulse**, or **PulseAudio**. `pactl`, `parec`, and `pacat` must be on PATH (usually `pulseaudio-utils` on Debian/Ubuntu or `libpulse` on Arch). `pactl` must support JSON output. No root permissions are needed for audio routing.
+The engine uses a mode-0700 per-user runtime directory and mode-0600 Unix socket,
+with a held file lock to enforce one engine. It exposes no network port. IPC is
+bounded at 64 KiB with message deadlines. Runtime path is
+`$XDG_RUNTIME_DIR/clearwave/engine.sock`, falling back to `/tmp/clearwave-UID/`.
+The GUI performs server operations on a control thread, updates meters at a limited
+cadence while active and avoids continual idle redraws. Stop/failure status remains
+visible on every page. Use one control window at a time to avoid overwriting edits
+from multiple windows.
 
-```sh
-./scripts/build.sh
-./dist/clearwave doctor --json
-./dist/clearwave
-```
+Defaults restore only if they still point at ClearWave when processing stops;
+changes made later by you or another app are preserved. Microphone and playback
+routes are checked by live process IDs. Disconnects, moved streams or server
+failures stop the affected pipeline and report an error; reconnect, refresh devices
+and enable again. There is no automatic capture restart onto an unintended mic.
+Playback can suspend while idle without being treated as a stall.
 
-To build and install a launcher entry under your user account:
+## Automation CLI
 
-```sh
-./scripts/install-desktop.sh
-```
-
-This builds first, copies the executable to `~/.local/share/clearwave/clearwave`, and installs `~/.local/share/applications/clearwave.desktop` (or the corresponding directories under `XDG_DATA_HOME`). Then search for **Clearwave** in the app launcher. The build script automatically finds Rust in `~/.cargo/bin` if it is missing from PATH. The first build needs internet access to download Rust dependencies.
-
-For a smaller Linux CLI executable without the desktop dependencies:
-
-```sh
-./scripts/build.sh cli
-./dist/clearwave --help
-```
-
-The executable still requires the operating system's libraries and audio utilities; it is not a fully static, universal Linux binary. The `cli` build replaces the executable in `dist/`.
-
-## Use the cleaned microphone
-
-1. Select a physical microphone, keep noise cleanup enabled, and start with 0 dB boost.
-2. Press Start. Choose **Clearwave Microphone** in your calling/recording application's microphone settings.
-3. Speak and check the input and cleaned-output meters. Add boost only if needed.
-4. Open the routing inspector to see exact source/destination IDs. Stop before changing processing settings.
-5. Keep Clearwave running during your call. Stopping removes its temporary audio devices.
-
-The speaker selector identifies the Linux monitoring destination; changing the system default is a separate, explicit action. Existing application streams may keep their old device until reselected or restarted. Headphone monitoring is optional and off by default.
-
-## Linux CLI for agents
+Existing microphone automation contracts remain supported:
 
 ```sh
 clearwave doctor --json
 clearwave devices --json
-clearwave run --input 'SOURCE_ID' --boost-db 6 --make-default --json
-clearwave run --input 'SOURCE_ID' --output 'HEADPHONE_SINK_ID' --monitor
-clearwave volume output 'SINK_ID' 80 --json
-clearwave default output 'SINK_ID' --json
+clearwave run --input SOURCE_ID --boost-db=-6 --no-denoise --json
+clearwave run --input SOURCE_ID --monitor --output HEADPHONE_SINK --make-default
+clearwave volume input SOURCE_ID 75 --json
+clearwave volume output SINK_ID 60 --json
+clearwave default output SINK_ID --json
 ```
 
-Use IDs from `devices`, not display names. `doctor` and `devices` do not capture audio. `run` stays in the foreground; supervise it as a normal process and send SIGINT or SIGTERM to stop it. JSON mode emits newline-delimited objects: `started` includes the virtual source ID, `levels` reports measured state, and `stopped` confirms normal shutdown. Errors go to stderr as JSON; exit status is nonzero. CLI argument errors use exit code 2.
+`run` is a foreground microphone session; Ctrl+C/SIGTERM stops and restores an
+owned default. `--make-default` is temporary; the separate `default` command is an
+explicit persistent system choice. `volume` changes hardware/server volume (0–150%),
+not processed gain. `--json` reports structured errors and nonzero exit status.
 
-`--make-default` temporarily switches the default microphone and restores it on normal shutdown only if it still points to this session. `default` and `volume` are explicit system changes and persist after the command. No automatic package installation, startup service, or background daemon is installed. Abrupt termination with SIGKILL or a crash cannot guarantee module/default cleanup; inspect `pactl list short modules` and remove only the affected Clearwave module IDs with `pactl unload-module ID`.
-
-## Windows desktop
-
-Install stable Rust with the MSVC toolchain and Visual Studio C++ Build Tools, then:
-
-```powershell
-.\scripts\build.ps1
-.\dist\clearwave.exe
-```
-
-The Windows backend is experimental and has not been compiled or tested on Windows. Enable microphone access for desktop apps in Windows settings. Select your physical input and an explicit output destination. To use cleanup in another application, install a virtual audio cable separately, select its **playback** endpoint as Clearwave's output, and select its paired **recording** endpoint as the other application's microphone. Clearwave does not install a Windows audio driver or automatically create a Windows virtual microphone. Selecting real speakers plays the processed voice aloud and can cause feedback.
-
-Windows system volume/default changes are not implemented in this version; use Windows Sound settings. The automation CLI is Linux-only. A Windows build must be built on Windows or with a separately configured cross-compilation toolchain.
-
-## Compatibility boundaries
-
-| Environment | Current implementation |
-| --- | --- |
-| PipeWire with PulseAudio compatibility | Linux device discovery, virtual mic, cleanup, routing, volume |
-| PulseAudio | Same command-based backend; JSON-capable `pactl` required |
-| ALSA-only / JACK-only | Not implemented; install/configure a supported desktop audio server |
-| USB / built-in / Bluetooth microphones | Usable when exposed as capture devices by the supported audio server; availability and quality depend on the hardware/profile |
-| Windows WASAPI | Experimental capture/playback backend; separate virtual cable needed for other apps |
-
-No application can promise support for every Linux driver or microphone. Clearwave uses devices already working in the operating system. Bluetooth headset profiles, permissions, unplugged devices, and audio-server failures are reported rather than silently simulated. Reconnect and refresh/restart after device changes. Automatic reconnection, saved profiles, autostart, echo cancellation, and a bundled Windows virtual driver are future work.
-
-## Development
+Background engine commands (start `clearwave daemon` first, or open the GUI):
 
 ```sh
-cargo build
-cargo run -- doctor --json
-cargo run
-cargo test
-cargo test --no-default-features
-cargo fmt
-cargo clippy --all-targets -- -D warnings
-cargo build --release
+clearwave daemon
+clearwave engine status --json
+clearwave engine configure my-settings.json --json
+clearwave engine start                 # output, using configured destination
+clearwave engine start --input         # explicit microphone capture
+clearwave engine stop --input
+clearwave engine stop                  # output
+clearwave engine shutdown
 ```
 
-`Cargo.lock` is now present from the local build; preserve it when distributing this executable and use `--locked`. Dependencies cached by that build allow offline rebuilds. Rustfmt has been applied; the Linux build script and CI check formatting with `cargo fmt --check`. No CI run has been performed here.
+`configure` takes the same versioned JSON schema as the saved settings. Use the GUI
+to create a valid example, then copy its settings file. Applying settings does not
+start stopped pipelines. Device changes restart only an already active pipeline.
+The socket protocol is newline-delimited JSON matching `src/engine.rs` Request;
+clients should use bounded connection/read/write timeouts. Separate foreground
+`run` sessions have independent ownership; the singleton applies to the daemon.
 
-`src/dsp.rs` owns 48 kHz mono cleanup/boost/limiting. `src/platform/` owns OS devices and session lifecycles. `src/ui.rs` owns the desktop interface and its background command worker. `src/main.rs` owns Linux CLI orchestration. `tests/` contains CLI contract tests; module tests cover processing and backend parsing. Format with rustfmt and lint with Clippy. Audio buffers are memory-only.
+## Optional desktop and login integration
 
-Before release, test with real USB, built-in, and Bluetooth microphones on both systems; verify virtual-device selection in a calling app, clipping behavior, latency, CPU use, unplug/replug, audio-server restart, and cleanup on stop. Unit tests do not establish audio quality or driver compatibility.
+`./scripts/install-desktop.sh` builds, installs to
+`${XDG_DATA_HOME:-$HOME/.local/share}/clearwave/clearwave`, and adds a launcher.
+Run it only when you want that persistent installation. `./scripts/build-appimage.sh`
+builds an x86_64 AppImage, downloading appimagetool if `APPIMAGETOOL` is not supplied.
+The AppImage still needs the host audio client tools and a working desktop GL/audio
+session. AppImage packaging is separate from validation of the Rust release build.
 
-Implementation references: [RNNoise frame/sample format](https://docs.rs/nnnoiseless/0.5.2/nnnoiseless/struct.DenoiseState.html), [PipeWire null sink](https://docs.pipewire.org/page_pulse_module_null_sink.html), [PipeWire remap source](https://docs.pipewire.org/page_pulse_module_remap_source.html), and [CPAL stream APIs](https://docs.rs/cpal/0.15.3/cpal/traits/trait.DeviceTrait.html).
+`packaging/clearwave.service` is an **uninstalled** user-service template. To opt in,
+copy it to `~/.config/systemd/user/`, adjust ExecStart for your install path, then
+run `systemctl --user daemon-reload` and
+`systemctl --user enable --now clearwave.service`. It starts only the idle daemon,
+not microphone capture. Disable with
+`systemctl --user disable --now clearwave.service`. Do not run a service and a second
+manual daemon intentionally; the singleton lock rejects the second instance.
+
+## Development and verification
+
+```sh
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo test --locked --no-default-features
+cargo build --release --locked
+bash -n scripts/build.sh scripts/build-appimage.sh scripts/install-desktop.sh
+```
+
+`src/enhance.rs` implements stereo EQ/dynamics; `src/dsp.rs` retains RNNoise/gating;
+`src/settings.rs` owns versioning/validation/persistence; `src/platform/linux.rs`
+owns PulseAudio children/modules/defaults; `src/engine.rs` owns IPC/session lifetime;
+`src/ui.rs` is the asynchronous desktop control surface. `tests/` contains CLI and
+process-isolated mock audio-server lifecycle tests. Tests generate audio/silence
+and never access personal microphones or change real audio defaults. No credentials
+or local `.env` files are needed. See `docs/validation.md` for verified behavior and
+remaining manual checks.
+
+UI framebuffer captures can be generated explicitly with
+`CLEARWAVE_CAPTURE_UI=/absolute/output/directory clearwave open`; this captures only
+the app's three pages and closes it, never the desktop or microphone. Use an isolated
+runtime/config and the test fixture server for reproducible captures.
+
+The original ClearWave implementation is MIT; dependency licenses still apply
+when sharing binaries with friends. `scripts/build.sh` collects dependency notices
+under `dist/licenses/`; review missing-notice warnings before redistribution. The
+FxSound research and standard DSP equation references, with explicit differences,
+are documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). No FxSound code or
+assets are distributed, and no FxSound-identical sound or universally optimal EQ
+is claimed.
+
+## Appearance
+
+Use the **Theme** menu on any page to select Follow Omarchy or an offline bundled
+palette: Tokyo Night, Catppuccin Mocha, Catppuccin Latte, Nord, Rosé Pine Dawn,
+Gruvbox, Everforest, Flexoki Light, or ClearWave Classic. No Omarchy installation
+is needed for the bundled palettes. Selection affects only this application.
+
+On first launch ClearWave follows a valid active Omarchy palette when available;
+otherwise it uses Classic. Manual selection overrides following and is saved.
+Following reads `$XDG_STATE_HOME/omarchy/current/theme/colors.toml` (default
+`~/.local/state/...`), falling back to the older `$XDG_CONFIG_HOME/omarchy/current/theme/colors.toml`
+location. The GUI checks for replacement every two seconds while following; it
+keeps the last valid palette during missing/invalid updates and shows a fallback
+notice. Closing the GUI stops theme checks while background audio continues.
+Palette changes crossfade over 250 ms and never restart processing or capture.

@@ -6,32 +6,24 @@ on:
 
 jobs:
   check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: Linux build dependencies
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev
-      - run: cargo generate-lockfile
       - run: cargo fmt --check
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test Linux CLI without GUI dependencies
-        if: runner.os == 'Linux'
         run: cargo test --locked --no-default-features
       - run: cargo build --release --locked
       - uses: actions/upload-artifact@v4
         with:
-          name: clearwave-${{ runner.os }}
+          name: clearwave-linux
           path: |
             target/release/clearwave
-            target/release/clearwave.exe
             Cargo.lock
 

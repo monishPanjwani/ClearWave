@@ -39,8 +39,8 @@ impl Settings {
     pub fn validate(&self) -> Result<()> {
         ensure!(!self.input.is_empty(), "Choose a microphone first.");
         ensure!(
-            self.boost_db.is_finite() && (0.0..=18.0).contains(&self.boost_db),
-            "Microphone boost must be between 0 and 18 dB."
+            self.boost_db.is_finite() && (-36.0..=18.0).contains(&self.boost_db),
+            "Microphone boost must be between -36 and 18 dB."
         );
         ensure!(
             !self.monitor || self.output.as_ref().is_some_and(|s| !s.is_empty()),
@@ -50,7 +50,7 @@ impl Settings {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Telemetry {
     pub input_peak: f32,
     pub output_peak: f32,

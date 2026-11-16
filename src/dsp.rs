@@ -10,6 +10,7 @@ pub struct Processor {
     gain: f32,
     limiter_gain: f32,
     speech_gate: SpeechGate,
+    denoise_mix: f32,
 }
 
 impl Default for Processor {
@@ -26,6 +27,7 @@ impl Processor {
             gain: 1.0,
             limiter_gain: 1.0,
             speech_gate: SpeechGate::default(),
+            denoise_mix: 0.0,
         }
     }
 
@@ -43,7 +45,7 @@ impl Processor {
                 0.0
             }
         });
-        if denoise {
+        {
             // RNNoise expects float samples on the signed 16-bit PCM scale.
             let scaled = clean.map(|x| x * 32767.0);
             let speech_probability = self.denoiser.process_frame(output, &scaled);
@@ -55,11 +57,14 @@ impl Processor {
                 self.warmed = true;
             }
             self.speech_gate.process(output, speech_probability);
-        } else {
-            output.copy_from_slice(&clean);
+        }
+        for (sample, dry) in output.iter_mut().zip(clean) {
+            let target = if denoise { 1.0 } else { 0.0 };
+            self.denoise_mix += (target - self.denoise_mix) * 0.001;
+            *sample = dry * (1.0 - self.denoise_mix) + *sample * self.denoise_mix;
         }
         let db = if boost_db.is_finite() {
-            boost_db.clamp(0.0, 18.0)
+            boost_db.clamp(-36.0, 18.0)
         } else {
             0.0
         };

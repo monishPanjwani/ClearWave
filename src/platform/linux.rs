@@ -293,6 +293,7 @@ struct Resources {
     children: Vec<Child>,
     modules: Vec<u32>,
     default_source: Option<(String, String)>,
+    default_sink: Option<(String, String)>,
 }
 
 impl Resources {
@@ -322,6 +323,13 @@ impl Resources {
                 }
             }
         }
+        if let Some((owned, previous)) = self.default_sink.take() {
+            if pactl(&["get-default-sink"]).is_ok_and(|current| current == owned) {
+                if let Err(error) = pactl(&["set-default-sink", &previous]) {
+                    eprintln!("Could not restore output: {error}");
+                }
+            }
+        }
         for module in self.modules.drain(..).rev() {
             if let Err(error) = pactl(&["unload-module", &module.to_string()]) {
                 eprintln!(
@@ -340,13 +348,29 @@ impl Drop for Resources {
 }
 
 fn audio_child(program: &str, device: &str, recording: bool) -> Result<Child> {
+    audio_child_channels(program, device, recording, false)
+}
+fn audio_child_channels(
+    program: &str,
+    device: &str,
+    recording: bool,
+    stereo: bool,
+) -> Result<Child> {
     Command::new(program)
         .args([
             "--raw",
             "--format=float32le",
             "--rate=48000",
-            "--channels=1",
-            "--channel-map=mono",
+            if stereo {
+                "--channels=2"
+            } else {
+                "--channels=1"
+            },
+            if stereo {
+                "--channel-map=front-left,front-right"
+            } else {
+                "--channel-map=mono"
+            },
             "--latency-msec=30",
             "--process-time-msec=10",
             "--client-name=Clearwave",
@@ -377,11 +401,27 @@ pub struct Session {
     watchdog: Option<JoinHandle<()>>,
     telemetry: Arc<Mutex<Telemetry>>,
     virtual_source: String,
+    controls: Arc<Mutex<crate::settings::Processing>>,
 }
 
 impl Session {
     pub fn start(settings: Settings, telemetry: Arc<Mutex<Telemetry>>) -> Result<Self> {
+        let processing = crate::settings::Processing {
+            denoise: settings.denoise,
+            gain_db: settings.boost_db,
+            ..Default::default()
+        };
+        Self::start_processed(settings, processing, telemetry)
+    }
+    pub fn start_processed(
+        settings: Settings,
+        processing: crate::settings::Processing,
+        telemetry: Arc<Mutex<Telemetry>>,
+    ) -> Result<Self> {
         settings.validate()?;
+        processing.validate()?;
+        let controls = Arc::new(Mutex::new(processing));
+        let worker_controls = controls.clone();
         validate_device(&settings.input, DeviceKind::Input)?;
         if settings.monitor {
             validate_device(
@@ -464,7 +504,7 @@ impl Session {
                 let result = process_audio(
                     capture_pipe,
                     playback_pipe,
-                    &settings,
+                    &worker_controls,
                     &worker_stop,
                     &worker_telemetry,
                     &worker_progress,
@@ -495,6 +535,7 @@ impl Session {
             watchdog: None,
             telemetry,
             virtual_source: source,
+            controls,
         };
         if let Err(error) = ready_rx.recv_timeout(Duration::from_secs(5)) {
             session.stop();
@@ -531,6 +572,14 @@ impl Session {
         Ok(session)
     }
 
+    pub fn update(&self, processing: crate::settings::Processing) -> Result<()> {
+        processing.validate()?;
+        *self
+            .controls
+            .lock()
+            .map_err(|_| anyhow!("DSP controls unavailable"))? = processing;
+        Ok(())
+    }
     pub fn virtual_source(&self) -> &str {
         &self.virtual_source
     }
@@ -687,13 +736,17 @@ fn quote_module_value(value: &str) -> String {
 fn process_audio(
     mut capture: impl Read,
     mut playback: impl Write,
-    settings: &Settings,
+    controls: &Mutex<crate::settings::Processing>,
     stop: &AtomicBool,
     telemetry: &Mutex<Telemetry>,
     progress: &AtomicU64,
     ready: mpsc::SyncSender<()>,
 ) -> Result<()> {
     let mut processor = Processor::new();
+    let mut settings = *controls
+        .lock()
+        .map_err(|_| anyhow!("DSP controls unavailable"))?;
+    let mut enhance = crate::enhance::Enhancer::new(settings);
     let mut bytes = [0_u8; FRAME * 4];
     let mut input = [0.0_f32; FRAME];
     let mut output = [0.0_f32; FRAME];
@@ -712,7 +765,14 @@ fn process_audio(
             .iter()
             .fold(0.0_f32, |peak, value| peak.max(value.abs()));
         let clipped = input.iter().filter(|value| value.abs() >= 0.999).count() as u64;
-        processor.process(&input, &mut output, settings.denoise, settings.boost_db);
+        if let Ok(next) = controls.try_lock() {
+            settings = *next;
+        }
+        enhance.update(settings);
+        processor.process(&input, &mut output, settings.denoise, 0.0);
+        for sample in &mut output {
+            *sample = enhance.frame([*sample, *sample])[0];
+        }
         let output_peak = output
             .iter()
             .fold(0.0_f32, |peak, value| peak.max(value.abs()));
@@ -737,6 +797,265 @@ fn process_audio(
     Ok(())
 }
 
+/// Independent stereo playback session. Does not move existing application streams.
+pub struct OutputSession {
+    resources: Arc<Mutex<Resources>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+    watchdog: Option<JoinHandle<()>>,
+    controls: Arc<Mutex<crate::settings::Processing>>,
+    telemetry: Arc<Mutex<Telemetry>>,
+    sink: String,
+}
+impl OutputSession {
+    pub fn start(
+        destination: &str,
+        processing: crate::settings::Processing,
+        telemetry: Arc<Mutex<Telemetry>>,
+    ) -> Result<Self> {
+        processing.validate()?;
+        validate_device(destination, DeviceKind::Output)?;
+        let sequence = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let sink = format!("clearwave_{}_{}_output", std::process::id(), sequence);
+        let mut resources = Resources::default();
+        resources.load_module(&[
+            "load-module",
+            "module-null-sink",
+            &format!("sink_name={sink}"),
+            "rate=48000",
+            "channels=2",
+            "channel_map=front-left,front-right",
+            "sink_properties=device.description='ClearWave Output'",
+        ])?;
+        let mut capture = audio_child_channels("parec", &format!("{sink}.monitor"), true, true)?;
+        let capture_pipe = capture
+            .stdout
+            .take()
+            .context("Missing output capture pipe")?;
+        resources.children.push(capture);
+        let mut playback = audio_child_channels("pacat", destination, false, true)?;
+        let playback_pipe = playback
+            .stdin
+            .take()
+            .context("Missing output playback pipe")?;
+        let playback_pid = playback.id();
+        resources.children.push(playback);
+        let resources = Arc::new(Mutex::new(resources));
+        let stop = Arc::new(AtomicBool::new(false));
+        let controls = Arc::new(Mutex::new(processing));
+        *telemetry
+            .lock()
+            .map_err(|_| anyhow!("Audio status unavailable"))? = Telemetry {
+            running: false,
+            ..Default::default()
+        };
+        let (r, s, c, t) = (
+            resources.clone(),
+            stop.clone(),
+            controls.clone(),
+            telemetry.clone(),
+        );
+        let (ready, received) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("clearwave-output".into())
+            .spawn(move || {
+                let result = process_stereo(capture_pipe, playback_pipe, &c, &s, &t, Some(ready));
+                if let Ok(mut status) = t.lock() {
+                    status.running = false;
+                    if !s.load(Ordering::Acquire) {
+                        status.error = Some(format!(
+                            "Output stopped: {}",
+                            result.err().map(|e| format!("{e:#}")).unwrap_or_default()
+                        ));
+                    }
+                }
+                s.store(true, Ordering::Release);
+                if let Ok(mut r) = r.lock() {
+                    r.cleanup();
+                }
+            })?;
+        let mut session = Self {
+            resources,
+            stop,
+            worker: Some(worker),
+            watchdog: None,
+            controls,
+            telemetry,
+            sink,
+        };
+        if let Err(error) = received.recv_timeout(Duration::from_secs(5)) {
+            session.stop();
+            bail!("Output did not start: {error}; check audio server and destination");
+        }
+        let sinks = json_command(&["--format=json", "list", "sinks"])?;
+        let streams = json_command(&["--format=json", "list", "sink-inputs"])?;
+        verify_playback_route(&sinks, &streams, destination, playback_pid)?;
+        let (r, s, t) = (
+            session.resources.clone(),
+            session.stop.clone(),
+            session.telemetry.clone(),
+        );
+        let destination = destination.to_owned();
+        session.watchdog = Some(
+            thread::Builder::new()
+                .name("clearwave-output-route".into())
+                .spawn(move || {
+                    while !s.load(Ordering::Acquire) {
+                        for _ in 0..10 {
+                            if s.load(Ordering::Acquire) {
+                                return;
+                            }
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                        let result = (|| -> Result<()> {
+                            let sinks = json_command(&["--format=json", "list", "sinks"])?;
+                            let streams = json_command(&["--format=json", "list", "sink-inputs"])?;
+                            verify_playback_route(&sinks, &streams, &destination, playback_pid)
+                        })();
+                        if let Err(error) = result {
+                            if s.load(Ordering::Acquire) {
+                                return;
+                            }
+                            s.store(true, Ordering::Release);
+                            if let Ok(mut status) = t.lock() {
+                                status.running = false;
+                                status.error = Some(format!("Output stopped: {error:#}"));
+                            }
+                            if let Ok(mut r) = r.lock() {
+                                for child in &mut r.children {
+                                    let _ = child.kill();
+                                }
+                            }
+                            return;
+                        }
+                    }
+                })?,
+        );
+        Ok(session)
+    }
+    pub fn virtual_sink(&self) -> &str {
+        &self.sink
+    }
+    pub fn update(&self, processing: crate::settings::Processing) -> Result<()> {
+        processing.validate()?;
+        *self
+            .controls
+            .lock()
+            .map_err(|_| anyhow!("DSP controls unavailable"))? = processing;
+        Ok(())
+    }
+    pub fn make_default(&mut self) -> Result<()> {
+        let mut r = self
+            .resources
+            .lock()
+            .map_err(|_| anyhow!("Output resources unavailable"))?;
+        if r.modules.is_empty() {
+            bail!("Output is stopped");
+        }
+        if r.default_sink.is_none() {
+            let previous = pactl(&["get-default-sink"])?;
+            pactl(&["set-default-sink", &self.sink])?;
+            r.default_sink = Some((self.sink.clone(), previous));
+        }
+        Ok(())
+    }
+    pub fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Ok(mut r) = self.resources.lock() {
+            r.cleanup();
+        }
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
+        }
+        if let Some(w) = self.watchdog.take() {
+            let _ = w.join();
+        }
+        if let Ok(mut t) = self.telemetry.lock() {
+            t.running = false;
+            t.input_peak = 0.0;
+            t.output_peak = 0.0;
+        }
+    }
+}
+impl Drop for OutputSession {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+fn verify_playback_route(sinks: &Value, streams: &Value, selected: &str, pid: u32) -> Result<()> {
+    let sink = sinks
+        .as_array()
+        .context("Invalid sink inventory")?
+        .iter()
+        .find(|v| v["name"].as_str() == Some(selected))
+        .context("Selected output disconnected")?;
+    let index = numeric_id(&sink["index"]).context("Missing output index")?;
+    let mut streams = streams
+        .as_array()
+        .context("Invalid playback inventory")?
+        .iter()
+        .filter(|v| numeric_id(&v["properties"]["application.process.id"]) == Some(pid as u64));
+    let stream = streams.next().context("Playback stream disappeared")?;
+    anyhow::ensure!(
+        streams.next().is_none() && numeric_id(&stream["sink"]) == Some(index),
+        "Playback moved away from selected output; restart after choosing a destination"
+    );
+    Ok(())
+}
+fn process_stereo(
+    mut capture: impl Read,
+    mut playback: impl Write,
+    controls: &Mutex<crate::settings::Processing>,
+    stop: &AtomicBool,
+    telemetry: &Mutex<Telemetry>,
+    mut ready: Option<mpsc::SyncSender<()>>,
+) -> Result<()> {
+    let mut settings = *controls
+        .lock()
+        .map_err(|_| anyhow!("DSP controls unavailable"))?;
+    let mut dsp = crate::enhance::Enhancer::new(settings);
+    let mut bytes = [0_u8; 480 * 8];
+    while !stop.load(Ordering::Acquire) {
+        capture
+            .read_exact(&mut bytes)
+            .context("Output capture stream ended")?;
+        if let Ok(p) = controls.try_lock() {
+            settings = *p;
+        }
+        dsp.update(settings);
+        let (mut input_peak, mut output_peak) = (0.0_f32, 0.0_f32);
+        let mut clipped = 0;
+        for frame in bytes.as_chunks_mut::<8>().0.iter_mut() {
+            let l = f32::from_le_bytes(frame[..4].try_into()?);
+            let r = f32::from_le_bytes(frame[4..].try_into()?);
+            for v in [l, r] {
+                if v.is_finite() {
+                    input_peak = input_peak.max(v.abs());
+                    if v.abs() >= 0.999 {
+                        clipped += 1;
+                    }
+                }
+            }
+            let y = dsp.frame([l, r]);
+            output_peak = output_peak.max(y[0].abs()).max(y[1].abs());
+            frame[..4].copy_from_slice(&y[0].to_le_bytes());
+            frame[4..].copy_from_slice(&y[1].to_le_bytes());
+        }
+        playback
+            .write_all(&bytes)
+            .context("Physical output stream ended")?;
+        if let Ok(mut t) = telemetry.try_lock() {
+            t.running = true;
+            t.input_peak = input_peak;
+            t.output_peak = output_peak;
+            t.clipped_samples += clipped;
+        }
+        if let Some(ready) = ready.take() {
+            let _ = ready.send(());
+        }
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,7 +1118,10 @@ mod tests {
         let result = process_audio(
             std::io::Cursor::new(bytes),
             &mut output,
-            &settings,
+            &Mutex::new(crate::settings::Processing {
+                denoise: settings.denoise,
+                ..Default::default()
+            }),
             &AtomicBool::new(false),
             &telemetry,
             &AtomicU64::new(0),

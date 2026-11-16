@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=Clearwave
-Comment=Local microphone cleanup and audio controls
+Name=ClearWave
+Comment=Linux playback enhancement and microphone cleanup
 Exec=clearwave open
 Icon=audio-input-microphone
 Terminal=false
