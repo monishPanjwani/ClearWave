@@ -7,8 +7,8 @@ license = "MIT"
 
 [features]
 default = ["gui"]
-gui = ["dep:eframe", "dep:image", "tray"]
-tray = ["dep:ksni"]
+gui = ["dep:eframe", "tray"]
+tray = ["dep:ksni", "dep:image"]
 
 [dependencies]
 anyhow = "1.0"

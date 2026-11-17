@@ -53,6 +53,12 @@ with tempfile.TemporaryDirectory(prefix='clearwave-private-tray-') as tmp:
         item=bus.get_object(service,'/StatusNotifierItem',introspect=False)
         props=dbus.Interface(item,'org.freedesktop.DBus.Properties')
         assert str(props.Get('org.kde.StatusNotifierItem','Status'))=='Active'
+        assert str(props.Get('org.kde.StatusNotifierItem','IconName')) == ''
+        pixmaps=props.Get('org.kde.StatusNotifierItem','IconPixmap')
+        assert {int(p[0]) for p in pixmaps} == {32,64}
+        for width,height,data in pixmaps:
+            assert len(data)==int(width)*int(height)*4
+            assert any(int(v) for v in data), 'tray logo is empty'
         menu=bus.get_object(service,'/MenuBar',introspect=False)
         menu=dbus.Interface(menu,'com.canonical.dbusmenu')
         def entries():

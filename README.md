@@ -164,8 +164,9 @@ existing tooling/runtime files; otherwise bounded downloads are cached in `dist/
 The AppImage still needs the host audio client tools and a working desktop GL/audio
 session. AppImage packaging is separate from validation of the Rust release build.
 
-The daemon owns a StatusNotifierItem/DBusMenu tray indicator. Idle, processing and
-error use different glyphs; the tooltip reports actual output/microphone state.
+The daemon owns a StatusNotifierItem/DBusMenu tray indicator with an embedded
+ClearWave logo, independent of installed icon themes. Processing adds a round
+badge and errors a square badge; the tooltip reports actual output/microphone state.
 The tray offers Open, independent Start/Stop, Stop all processing, login startup
 and Quit. Stop all retains an idle daemon; Quit closes its window, restores owned
 defaults and exits without restarting. Reopening the GUI raises the existing

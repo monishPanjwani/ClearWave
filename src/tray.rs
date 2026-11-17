@@ -54,50 +54,61 @@ impl ksni::Tray for Indicator {
         ksni::Status::Active
     }
     fn icon_name(&self) -> String {
-        let s = &self.state;
-        format!(
-            "clearwave-{}-symbolic",
-            if s.warning.is_some() || s.input.error.is_some() || s.output.error.is_some() {
-                "error"
-            } else if s.input.running || s.output.running {
-                "processing"
-            } else {
-                "idle"
-            }
-        )
+        // An unresolved theme name can take precedence over IconPixmap in panels.
+        // Always use our self-contained logo, including standalone/AppImage runs.
+        String::new()
     }
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        // Original wave glyph. Shape changes between idle (bar), running (wave), error (!).
+        static LOGO: std::sync::OnceLock<Vec<ksni::Icon>> = std::sync::OnceLock::new();
+        let mut icons = LOGO
+            .get_or_init(|| {
+                let logo = image::load_from_memory(include_bytes!("../assets/clearwave.png"))
+                    .expect("bundled ClearWave logo must be a valid PNG");
+                [32, 64]
+                    .into_iter()
+                    .map(|size| {
+                        let rgba = logo
+                            .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
+                            .into_rgba8();
+                        // SNI requires network-order ARGB32; image returns RGBA.
+                        let data = rgba
+                            .pixels()
+                            .flat_map(|p| [p[3], p[0], p[1], p[2]])
+                            .collect();
+                        ksni::Icon {
+                            width: size as i32,
+                            height: size as i32,
+                            data,
+                        }
+                    })
+                    .collect()
+            })
+            .clone();
         let error = self.state.warning.is_some()
             || self.state.input.error.is_some()
             || self.state.output.error.is_some();
         let running = self.state.input.running || self.state.output.running;
-        let mut data = vec![0; 32 * 32 * 4];
-        for x in 4..28 {
-            for y in 4..28 {
-                let mark = if error {
-                    (14..18).contains(&x) && ((6..21).contains(&y) || (24..27).contains(&y))
-                } else if running {
-                    let center = 16.0 + ((x as f32 - 4.0) * 0.58).sin() * 7.0;
-                    (y as f32 - center).abs() < 2.0
-                } else {
-                    (14..18).contains(&y)
-                };
-                if mark {
-                    let i = (y * 32 + x) * 4;
-                    data[i..i + 4].copy_from_slice(if error {
-                        &[255, 245, 160, 70]
-                    } else {
-                        &[255, 110, 210, 235]
-                    });
+        if error || running {
+            for icon in &mut icons {
+                let size = icon.width as usize;
+                for y in 0..size / 3 {
+                    for x in size * 2 / 3..size {
+                        // Square error vs round processing badge: status isn't color-only.
+                        let dx = x as f32 - size as f32 * 5.0 / 6.0;
+                        let dy = y as f32 - size as f32 / 6.0;
+                        if error || dx * dx + dy * dy < (size as f32 / 6.0).powi(2) {
+                            let i = (y * size + x) * 4;
+                            icon.data[i..i + 4].copy_from_slice(if error {
+                                &[255, 245, 160, 70]
+                            } else {
+                                &[255, 101, 229, 210]
+                            });
+                        }
+                    }
                 }
             }
         }
-        vec![ksni::Icon {
-            width: 32,
-            height: 32,
-            data,
-        }]
+        icons
     }
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
