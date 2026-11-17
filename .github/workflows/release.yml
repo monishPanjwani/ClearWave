@@ -13,15 +13,22 @@ jobs:
         with:
           components: rustfmt
       - name: Linux dependencies
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev dbus-x11 python3-dbus python3-gi desktop-file-utils
       - run: cargo test --locked
       - name: Build AppImage
         run: ./scripts/build-appimage.sh
+      - name: Verify packaged tray and startup
+        run: |
+          APPIMAGE_EXTRACT_AND_RUN=1 dbus-run-session -- /usr/bin/python3 scripts/test-private-tray.py dist/Clearwave-x86_64.AppImage
+          /usr/bin/python3 scripts/test-autostart-exec.py dist/clearwave
+      - name: Package standalone Linux binary and notices
+        run: tar -C dist -czf dist/Clearwave-linux-x86_64.tar.gz clearwave LICENSE THIRD_PARTY_NOTICES.md README.md licenses
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux
           path: |
             dist/Clearwave-x86_64.AppImage
+            dist/Clearwave-linux-x86_64.tar.gz
           if-no-files-found: error
   publish:
     needs: build
