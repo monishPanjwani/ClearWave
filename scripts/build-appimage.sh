@@ -4,25 +4,32 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 ./scripts/build.sh
 mkdir -p dist/AppDir/usr/bin dist/AppDir/usr/share/applications
 cp dist/clearwave dist/AppDir/usr/bin/
+mkdir -p dist/AppDir/usr/share/icons/hicolor/scalable/status
+cp assets/tray/*.svg dist/AppDir/usr/share/icons/hicolor/scalable/status/
 mkdir -p dist/AppDir/usr/share/doc/clearwave
 cp LICENSE THIRD_PARTY_NOTICES.md README.md dist/AppDir/usr/share/doc/clearwave/
 cp -R dist/licenses dist/AppDir/usr/share/doc/clearwave/
 cp packaging/clearwave.desktop dist/AppDir/clearwave.desktop
 sed -i 's/Icon=audio-input-microphone/Icon=clearwave/' dist/AppDir/clearwave.desktop
 cp dist/AppDir/clearwave.desktop dist/AppDir/usr/share/applications/
-cat > dist/AppDir/clearwave.svg <<'ICON'
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect width="256" height="256" rx="48" fill="#123b50"/><path d="M48 128h24l16-48 24 96 24-112 24 96 16-32h32" fill="none" stroke="#65e5d2" stroke-width="12" stroke-linejoin="round"/></svg>
-ICON
+cp assets/clearwave.svg dist/AppDir/clearwave.svg
+cp assets/clearwave.png dist/AppDir/clearwave.png
+ln -sfn clearwave.png dist/AppDir/.DirIcon
 cat > dist/AppDir/AppRun <<'RUN'
 #!/bin/sh
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(CDPATH= cd -- "${0%/*}" && pwd)
 exec "$HERE/usr/bin/clearwave" "$@"
 RUN
 chmod +x dist/AppDir/AppRun
 # Supply APPIMAGETOOL to use an already downloaded tool.
 : "${APPIMAGETOOL:=$PWD/dist/appimagetool-x86_64.AppImage}"
 if [[ ! -f "$APPIMAGETOOL" ]]; then
-  curl --fail --location --retry 3 https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -o "$APPIMAGETOOL"
+  curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -o "$APPIMAGETOOL"
 fi
 chmod +x "$APPIMAGETOOL"
-ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" dist/AppDir dist/Clearwave-x86_64.AppImage
+# Cache the runtime too; appimagetool's implicit download can wait indefinitely.
+: "${APPIMAGE_RUNTIME:=$PWD/dist/runtime-x86_64}"
+if [[ ! -f "$APPIMAGE_RUNTIME" ]]; then
+  curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64 -o "$APPIMAGE_RUNTIME"
+fi
+ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" --runtime-file "$APPIMAGE_RUNTIME" dist/AppDir dist/Clearwave-x86_64.AppImage

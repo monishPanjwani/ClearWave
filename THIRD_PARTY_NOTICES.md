@@ -67,3 +67,11 @@ No theme scripts, wallpapers, fonts or logos are copied. The palette data is
 compiled into the application for offline portability. Text/secondary/semantic
 colors may be derived for contrast; card surfaces use lighter_background and
 missing fields fall back to documented defaults in `src/theme.rs`.
+
+## Background indicator
+
+The original app art in `assets/clearwave.svg`/`.png` and wave/status glyphs in
+`assets/tray/` and `src/tray.rs` are ClearWave
+MIT assets. SNI/DBusMenu uses ksni 0.3.3 (Unlicense), with its transitive
+dependencies' notices collected in `dist/licenses/` by `scripts/collect-licenses.py`.
+No desktop panel artwork or shell integration code is copied.

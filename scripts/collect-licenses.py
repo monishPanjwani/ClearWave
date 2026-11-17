@@ -16,7 +16,7 @@ for package in sorted(metadata['packages'],key=lambda p:(p['name'],p['version'])
     names=[]
     for path in folder.rglob('*'):
         name=path.name.upper()
-        if path.is_file() and (name.startswith(('LICENSE','COPYING','COPYRIGHT','OFL')) or name=='NOTICE'):
+        if path.is_file() and (name.startswith(('LICENSE','COPYING','COPYRIGHT','OFL')) or name in {'NOTICE','UNLICENSE'}):
             relative=path.relative_to(folder)
             target=out/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(path,target);names.append(str(relative))
     supplemental=None

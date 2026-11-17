@@ -28,6 +28,11 @@ const LIMIT: u64 = 65536;
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     Status,
+    Open,
+    Startup,
+    StopAll,
+    SetAutostart { enabled: bool },
+    ToggleAutostart,
     Devices,
     Configure { config: Box<Config> },
     Start { input: bool },
@@ -37,6 +42,8 @@ pub enum Request {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Status {
+    pub autostart: crate::autostart::State,
+    pub tray_available: bool,
     pub config: Config,
     pub input: Telemetry,
     pub output: Telemetry,
@@ -169,7 +176,7 @@ pub fn ensure_running() -> Result<()> {
         return Ok(());
     }
     use std::os::unix::process::CommandExt;
-    let mut command = std::process::Command::new(std::env::current_exe()?);
+    let mut command = std::process::Command::new(crate::autostart::executable()?);
     // SAFETY: setsid is async-signal-safe; no allocation or shared state in pre_exec.
     unsafe {
         command.pre_exec(|| {
@@ -205,6 +212,9 @@ struct Engine {
     output_levels: Arc<Mutex<Telemetry>>,
     path: PathBuf,
     save_at: Option<Instant>,
+    startup_pending: [bool; 2],
+    startup_attempts: u8,
+    startup_at: Option<Instant>,
 }
 impl Engine {
     fn new(path: PathBuf) -> Self {
@@ -227,9 +237,13 @@ impl Engine {
             output_levels: Arc::default(),
             path,
             save_at: None,
+            startup_pending: [false; 2],
+            startup_attempts: 0,
+            startup_at: None,
         }
     }
     fn snapshot(&mut self) -> Status {
+        self.status.autostart = crate::autostart::inspect();
         self.status.input = self
             .input_levels
             .lock()
@@ -277,6 +291,7 @@ impl Engine {
         Ok(())
     }
     fn stop(&mut self, input: bool) {
+        self.startup_pending[usize::from(input)] = false;
         if input {
             if let Some(mut s) = self.input.take() {
                 s.stop();
@@ -338,12 +353,144 @@ impl Engine {
         }
         Ok(())
     }
+    fn startup_tick(&mut self) {
+        if !self.startup_at.is_some_and(|t| Instant::now() >= t) {
+            return;
+        }
+        self.startup_attempts += 1;
+        for input in [false, true] {
+            let index = usize::from(input);
+            if !self.startup_pending[index] {
+                continue;
+            }
+            let id = if input {
+                &self.status.config.input.device
+            } else {
+                &self.status.config.output.device
+            };
+            let readiness = (|| -> Result<()> {
+                ensure!(
+                    !id.is_empty(),
+                    "Select and save a {} device before enabling automatic processing",
+                    if input { "microphone" } else { "output" }
+                );
+                let inventory = platform::enumerate()?;
+                ensure!(
+                    inventory.devices.iter().any(|d| d.id == *id
+                        && d.kind
+                            == if input {
+                                crate::model::DeviceKind::Input
+                            } else {
+                                crate::model::DeviceKind::Output
+                            }),
+                    "Saved {} device is unavailable: {}",
+                    if input { "microphone" } else { "output" },
+                    id
+                );
+                Ok(())
+            })();
+            if let Err(e) = readiness {
+                let levels = if input {
+                    &self.input_levels
+                } else {
+                    &self.output_levels
+                };
+                if let Ok(mut t) = levels.lock() {
+                    t.error = Some(format!("Login startup: {e:#}"));
+                }
+                continue;
+            }
+            // Only readiness is retried. Processing/default failures are terminal and visible.
+            self.startup_pending[index] = false;
+            let result = self.start(input).and_then(|()| {
+                if input && self.status.config.startup.default_input {
+                    self.input
+                        .as_mut()
+                        .context("Input unavailable")?
+                        .make_default()?;
+                }
+                if !input && self.status.config.startup.default_output {
+                    self.output
+                        .as_mut()
+                        .context("Output unavailable")?
+                        .make_default()?;
+                }
+                Ok(())
+            });
+            if let Err(e) = result {
+                let levels = if input {
+                    &self.input_levels
+                } else {
+                    &self.output_levels
+                };
+                if let Ok(mut t) = levels.lock() {
+                    t.error = Some(format!("Login startup failed: {e:#}"));
+                }
+            }
+        }
+        if self.startup_pending.iter().any(|p| *p) && self.startup_attempts < 20 {
+            self.startup_at = Some(Instant::now() + Duration::from_secs(2));
+        } else {
+            self.startup_at = None;
+            self.startup_pending = [false; 2];
+        }
+    }
     fn handle(&mut self, request: Request) -> Result<Option<Inventory>> {
         match request {
             Request::Status => {}
+            Request::Open => {
+                let mut child = std::process::Command::new(crate::autostart::executable()?)
+                    .arg("open")
+                    .env("CLEARWAVE_EXISTING_ENGINE_ONLY", "1")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()?;
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Request::SetAutostart { enabled } => crate::autostart::set(enabled)?,
+            Request::ToggleAutostart => {
+                crate::autostart::set(!crate::autostart::inspect().enabled)?;
+            }
+            Request::Startup => {
+                use std::hash::{Hash, Hasher};
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                std::env::var("XDG_SESSION_ID")
+                    .unwrap_or_default()
+                    .hash(&mut hash);
+                std::env::var("DBUS_SESSION_BUS_ADDRESS")
+                    .unwrap_or_default()
+                    .hash(&mut hash);
+                let marker = runtime_dir()?.join(format!("startup-{:x}", hash.finish()));
+                match OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(marker)
+                {
+                    Ok(_) => {
+                        self.startup_pending = [
+                            self.status.config.startup.output,
+                            self.status.config.startup.microphone,
+                        ];
+                        self.startup_attempts = 0;
+                        self.startup_at = Some(Instant::now());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Request::StopAll => {
+                self.stop(true);
+                self.stop(false);
+            }
+
             Request::Devices => return Ok(Some(platform::enumerate()?)),
             Request::Configure { config } => self.configure(*config)?,
             Request::Start { input } => {
+                self.startup_pending[usize::from(input)] = false;
                 if let Err(e) = self.start(input) {
                     let levels = if input {
                         &self.input_levels
@@ -382,6 +529,11 @@ pub fn run_daemon() -> Result<()> {
     let dir = runtime_dir()?;
     let (_owner, listener) = SocketOwner::bind(&dir)?;
     let mut engine = Engine::new(settings::config_path()?);
+    #[cfg(feature = "tray")]
+    let (tray_tx, tray_rx) = std::sync::mpsc::sync_channel(16);
+    #[cfg(feature = "tray")]
+    let tray = crate::tray::Service::start(tray_tx);
+
     let interrupted = Arc::new(AtomicBool::new(false));
     let signal = interrupted.clone();
     let socket = dir.join("engine.sock");
@@ -393,17 +545,31 @@ pub fn run_daemon() -> Result<()> {
         if interrupted.load(Ordering::Acquire) {
             break;
         }
+        #[cfg(feature = "tray")]
+        {
+            engine.status.tray_available = tray.online.load(Ordering::Acquire);
+            while let Ok(command) = tray_rx.try_recv() {
+                let quit = matches!(command, Request::Shutdown);
+                if let Err(e) = engine.handle(command) {
+                    engine.status.warning = Some(format!("Tray action failed: {e:#}"));
+                }
+                if quit {
+                    interrupted.store(true, Ordering::Release);
+                    break;
+                }
+            }
+            if let Ok(mut state) = tray.snapshot.lock() {
+                *state = engine.snapshot();
+            }
+        }
+        if interrupted.load(Ordering::Acquire) {
+            break;
+        }
+        engine.startup_tick();
         if engine.save_at.is_some_and(|t| Instant::now() >= t) {
             engine.persist();
         }
-        let timeout = engine
-            .save_at
-            .map(|t| {
-                t.saturating_duration_since(Instant::now())
-                    .as_millis()
-                    .min(i32::MAX as u128) as i32
-            })
-            .unwrap_or(-1);
+        let timeout = 250;
         let mut fd = libc::pollfd {
             fd: listener.as_raw_fd(),
             events: libc::POLLIN,
@@ -445,6 +611,9 @@ pub fn run_daemon() -> Result<()> {
         if shutdown {
             break;
         }
+    }
+    if let Ok(socket) = std::os::unix::net::UnixDatagram::unbound() {
+        let _ = socket.send_to(b"quit", dir.join("gui.sock"));
     }
     engine.persist();
     engine.stop(true);

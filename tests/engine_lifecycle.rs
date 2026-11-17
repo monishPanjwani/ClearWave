@@ -20,7 +20,12 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("clearwave-lifecycle-{}", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "clearwave-lifecycle-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -37,6 +42,10 @@ impl Fixture {
         }
         let child = Command::new(env!("CARGO_BIN_EXE_clearwave"))
             .arg("daemon")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                "unix:path=/nonexistent-clearwave-test-bus",
+            )
             .env("XDG_RUNTIME_DIR", &dir)
             .env("XDG_CONFIG_HOME", dir.join("config"))
             .env("CLEARWAVE_MOCK_DIR", &dir)
@@ -173,4 +182,106 @@ fn independent_sessions_live_controls_default_ownership_and_rollback() {
     assert!(!f.socket().exists());
     let persisted = Config::load(&f.dir.join("config/clearwave/settings.json")).unwrap();
     assert_eq!(persisted, config);
+}
+
+#[test]
+fn login_policy_runs_once_and_stop_cancels_missing_device_retry() {
+    let mut f = Fixture::new();
+    let mut c = Config::default();
+    c.input.device = "missing-microphone".into();
+    c.output.device = "speakers".into();
+    c.input.processing.denoise = false;
+    c.startup.output = true;
+    c.startup.microphone = true;
+    f.request(Request::Configure {
+        config: Box::new(c.clone()),
+    });
+    // Configuring login consent does not activate either path now.
+    let s = f.request(Request::Status).status.unwrap();
+    assert!(!s.input.running && !s.output.running);
+    f.request(Request::Startup);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let s = f.request(Request::Status).status.unwrap();
+        if s.output.running {
+            assert!(!s.input.running);
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(f.state()["default_sink"], "speakers");
+    f.request(Request::StopAll);
+    c.input.device = "mic".into();
+    f.request(Request::Configure {
+        config: Box::new(c),
+    });
+    f.request(Request::Startup); // duplicate login invocation must not reactivate stopped audio
+    std::thread::sleep(Duration::from_millis(2300));
+    let s = f.request(Request::Status).status.unwrap();
+    assert!(!s.input.running && !s.output.running);
+    assert!(f.state()["modules"].as_object().unwrap().is_empty());
+    f.request(Request::Shutdown);
+    f.wait_exit();
+    assert!(!f.socket().exists());
+}
+#[test]
+fn login_can_start_both_saved_paths_with_explicit_defaults() {
+    let mut f = Fixture::new();
+    let mut c = Config::default();
+    c.input.device = "mic".into();
+    c.output.device = "speakers".into();
+    c.input.processing.denoise = false;
+    c.startup.output = true;
+    c.startup.microphone = true;
+    c.startup.default_input = true;
+    c.startup.default_output = true;
+    f.request(Request::Configure {
+        config: Box::new(c),
+    });
+    f.request(Request::Startup);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let s = f.request(Request::Status).status.unwrap();
+        if s.input.running && s.output.running {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_ne!(f.state()["default_source"], "mic");
+    assert_ne!(f.state()["default_sink"], "speakers");
+    f.request(Request::StopAll);
+    assert_eq!(f.state()["default_source"], "mic");
+    assert_eq!(f.state()["default_sink"], "speakers");
+    f.request(Request::Shutdown);
+    f.wait_exit();
+}
+
+#[test]
+fn login_waits_for_late_audio_server_without_early_capture() {
+    let mut f = Fixture::new();
+    fs::write(f.dir.join("server-unavailable"), b"").unwrap();
+    let mut c = Config::default();
+    c.input.device = "mic".into();
+    c.input.processing.denoise = false;
+    c.startup.microphone = true;
+    f.request(Request::Configure {
+        config: Box::new(c),
+    });
+    f.request(Request::Startup);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!f.request(Request::Status).status.unwrap().input.running);
+    fs::remove_file(f.dir.join("server-unavailable")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if f.request(Request::Status).status.unwrap().input.running {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(f.state()["default_source"], "mic");
+    f.request(Request::Shutdown);
+    f.wait_exit();
 }

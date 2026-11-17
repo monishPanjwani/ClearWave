@@ -30,6 +30,37 @@ enum Event {
     Tick(Status),
 }
 pub fn run() -> anyhow::Result<()> {
+    use std::os::{
+        fd::AsRawFd,
+        unix::{fs::OpenOptionsExt, net::UnixDatagram},
+    };
+    let dir = engine::runtime_dir()?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir.join("gui.lock"))?;
+    // SAFETY: the owned descriptor stays alive until run_native returns.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let socket = UnixDatagram::unbound()?;
+        socket.send_to(b"open", dir.join("gui.sock"))?;
+        return Ok(());
+    }
+    let socket_path = dir.join("gui.sock");
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path)?;
+    }
+    let activation = UnixDatagram::bind(&socket_path)?;
+    activation.set_nonblocking(true)?;
+    if std::env::var_os("CLEARWAVE_EXISTING_ENGINE_ONLY").is_some() {
+        engine::request(&Request::Status)?;
+    } else {
+        engine::ensure_running()?;
+    }
+
     eframe::run_native(
         "ClearWave",
         eframe::NativeOptions {
@@ -38,12 +69,12 @@ pub fn run() -> anyhow::Result<()> {
                 .with_inner_size(if std::env::var_os("CLEARWAVE_CAPTURE_MINIMUM").is_some() {
                     [520.0, 620.0]
                 } else {
-                    [720.0, 810.0]
+                    [760.0, 660.0]
                 })
-                .with_min_inner_size([520.0, 620.0]),
+                .with_min_inner_size([520.0, 580.0]),
             ..Default::default()
         },
-        Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))),
+        Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, activation)))),
     )
     .map_err(|e| anyhow::anyhow!("Cannot open ClearWave: {e}"))
 }
@@ -67,9 +98,11 @@ struct App {
     theme: ThemeManager,
     capture_stage: usize,
     capture_requested: bool,
+    activation: std::os::unix::net::UnixDatagram,
 }
 impl App {
-    fn new(ctx: &egui::Context) -> Self {
+    fn new(ctx: &egui::Context, activation: std::os::unix::net::UnixDatagram) -> Self {
+        configure_typography(ctx);
         ctx.style_mut(|s| {
             s.spacing.item_spacing = egui::vec2(12.0, 10.0);
             s.spacing.button_padding = egui::vec2(14.0, 9.0);
@@ -99,6 +132,7 @@ impl App {
             theme: ThemeManager::new(None),
             capture_stage: 0,
             capture_requested: false,
+            activation,
         }
     }
     fn submit(&mut self, request: Request) {
@@ -172,24 +206,26 @@ impl App {
         } else {
             self.status.output.running
         };
+        ui.horizontal(|ui| {
         ui.label(
             RichText::new(if input {
                 "A clearer voice."
             } else {
                 "Hear the detail."
             })
-            .size(28.0)
+            .size(20.0)
             .strong(),
         );
-        ui.label(
-            RichText::new(if input {
-                "Private microphone cleanup, shaped for your voice."
+        information(
+            ui,
+            "About processing",
+            if input {
+                "Private microphone cleanup, shaped for your voice. Capture starts only when you enable input. Choose “Clearwave Microphone” in your call app after enabling."
             } else {
-                "Shape your music, films and everyday listening."
-            })
-            .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
+                "Shape your music, films and everyday listening. Choose “ClearWave Output” in your app after enabling, or use the routing controls in Advanced."
+            },
         );
-        ui.add_space(12.0);
+        });
         let label = if running {
             if input {
                 "Stop input"
@@ -206,7 +242,7 @@ impl App {
                 self.ready && !self.busy,
                 egui::Button::new(RichText::new(label).color(button_text(ui)).strong())
                     .fill(ui.visuals().selection.stroke.color)
-                    .min_size(egui::vec2(ui.available_width(), 44.0)),
+                    .min_size(egui::vec2(190.0, 36.0)),
             )
             .clicked()
         {
@@ -223,177 +259,198 @@ impl App {
         } else {
             &mut self.config.output
         };
-        card(ui).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(
-                RichText::new(if input { "MICROPHONE" } else { "PLAY THROUGH" })
-                    .small()
-                    .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
-            );
-            picker(
-                ui,
-                if input { "input" } else { "output" },
-                &self.inventory,
-                if input {
-                    DeviceKind::Input
-                } else {
-                    DeviceKind::Output
-                },
-                &mut channel.device,
-            );
-            ui.add_space(4.0);
-            let presets: &[&str] = if input {
-                &["Natural", "Clear Speech", "Warm Voice", "Noisy Room"]
-            } else {
-                &["Neutral", "Music", "Movies", "Voice"]
-            };
-            egui::ComboBox::from_id_salt("preset")
-                .selected_text(&channel.preset)
-                .width(ui.available_width())
-                .show_ui(ui, |ui| {
-                    for name in presets {
-                        if ui
-                            .selectable_label(channel.preset == *name, *name)
-                            .clicked()
-                        {
-                            channel.preset = (*name).into();
-                            channel.processing = Processing::preset(name, input);
-                        }
-                    }
-                    for preset in self.config.presets.iter().filter(|p| p.input == input) {
-                        if ui
-                            .selectable_label(channel.preset == preset.name, &preset.name)
-                            .clicked()
-                        {
-                            channel.preset = preset.name.clone();
-                            channel.processing = preset.processing;
-                        }
-                    }
-                });
-            let previous = channel.processing;
-            ui.add_space(5.0);
-            slider(
-                ui,
-                "Processed gain",
-                &mut channel.processing.gain_db,
-                -36.0..=18.0,
-                " dB",
-            );
-            if input {
-                ui.checkbox(&mut channel.processing.denoise, "Remove background noise");
-            }
-            if channel.processing != previous {
-                channel.preset = "Custom".into();
-            }
-            let offset = if input { 0 } else { 2 };
-            meter(
-                ui,
-                if input { "Original input" } else { "Incoming" },
-                self.meters[offset],
-            );
-            meter(ui, "Processed", self.meters[offset + 1]);
-        });
-        ui.add_space(10.0);
-        card(ui).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(
-                RichText::new("EQUALIZER")
-                    .small()
-                    .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
-            );
-            let before = channel.processing;
-            ui.columns(5, |columns| {
-                for ((ui, f), gain) in columns
-                    .iter_mut()
-                    .zip(FREQUENCIES)
-                    .zip(channel.processing.eq_db.iter_mut())
-                {
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            RichText::new(if f >= 1000.0 {
-                                format!("{}k", f / 1000.0)
-                            } else {
-                                format!("{f}")
-                            })
+        let width = ui.available_width();
+        let column_width = if width >= 900.0 {
+            (width - 48.0) / 2.0
+        } else {
+            (width - 16.0).max(0.0)
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 16.0;
+            ui.vertical(|ui| {
+                ui.set_width(column_width);
+                card(ui).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        RichText::new(if input { "MICROPHONE" } else { "PLAY THROUGH" })
                             .small()
                             .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
-                        );
-                        ui.spacing_mut().slider_width = 95.0;
-                        ui.add(
-                            egui::Slider::new(gain, -12.0..=12.0)
-                                .vertical()
-                                .show_value(false),
-                        );
-                        ui.label(RichText::new(format!("{gain:+.1}")).small());
-                    });
-                }
+                    );
+                    picker(
+                        ui,
+                        if input { "input" } else { "output" },
+                        &self.inventory,
+                        if input {
+                            DeviceKind::Input
+                        } else {
+                            DeviceKind::Output
+                        },
+                        &mut channel.device,
+                    );
+                    ui.add_space(4.0);
+                    let presets: &[&str] = if input {
+                        &["Natural", "Clear Speech", "Warm Voice", "Noisy Room"]
+                    } else {
+                        &["Neutral", "Music", "Movies", "Voice"]
+                    };
+                    egui::ComboBox::from_id_salt("preset")
+                        .selected_text(&channel.preset)
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for name in presets {
+                                if ui
+                                    .selectable_label(channel.preset == *name, *name)
+                                    .clicked()
+                                {
+                                    channel.preset = (*name).into();
+                                    channel.processing = Processing::preset(name, input);
+                                }
+                            }
+                            for preset in self.config.presets.iter().filter(|p| p.input == input) {
+                                if ui
+                                    .selectable_label(channel.preset == preset.name, &preset.name)
+                                    .clicked()
+                                {
+                                    channel.preset = preset.name.clone();
+                                    channel.processing = preset.processing;
+                                }
+                            }
+                        });
+                    let previous = channel.processing;
+                    ui.add_space(5.0);
+                    slider(
+                        ui,
+                        "Processed gain",
+                        &mut channel.processing.gain_db,
+                        -36.0..=18.0,
+                        " dB",
+                    );
+                    if input {
+                        ui.checkbox(&mut channel.processing.denoise, "Remove background noise");
+                    }
+                    if channel.processing != previous {
+                        channel.preset = "Custom".into();
+                    }
+                    let offset = if input { 0 } else { 2 };
+                    meter(
+                        ui,
+                        if input { "Original input" } else { "Incoming" },
+                        self.meters[offset],
+                    );
+                    meter(ui, "Processed", self.meters[offset + 1]);
+                });
             });
-            if !input {
-                ui.separator();
-                slider(
-                    ui,
-                    "Bass",
-                    &mut channel.processing.bass_db,
-                    0.0..=9.0,
-                    " dB",
-                );
-                slider(
-                    ui,
-                    "Clarity",
-                    &mut channel.processing.clarity_db,
-                    0.0..=6.0,
-                    " dB",
-                );
-                slider(
-                    ui,
-                    "Stereo width",
-                    &mut channel.processing.width,
-                    0.0..=2.0,
-                    "×",
-                );
-            }
-            if channel.processing != before {
-                channel.preset = "Custom".into();
-            }
-            if ui.small_button("Reset to neutral").clicked() {
-                channel.processing = Processing::default();
-                channel.preset = "Neutral".into();
-            }
+            ui.vertical(|ui| {
+                ui.set_width(column_width);
+                card(ui).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        RichText::new("EQUALIZER")
+                            .small()
+                            .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
+                    );
+                    let before = channel.processing;
+                    ui.columns(5, |columns| {
+                        for ((ui, f), gain) in columns
+                            .iter_mut()
+                            .zip(FREQUENCIES)
+                            .zip(channel.processing.eq_db.iter_mut())
+                        {
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(if f >= 1000.0 {
+                                        format!("{}k", f / 1000.0)
+                                    } else {
+                                        format!("{f}")
+                                    })
+                                    .small()
+                                    .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
+                                );
+                                ui.spacing_mut().slider_width = 95.0;
+                                ui.add_sized(
+                                    [ui.spacing().interact_size.y, 95.0],
+                                    egui::Slider::new(gain, -12.0..=12.0)
+                                        .vertical()
+                                        .show_value(false),
+                                );
+                                ui.label(RichText::new(format!("{gain:+.1}")).small());
+                            });
+                        }
+                    });
+                    if !input {
+                        ui.separator();
+                        slider(
+                            ui,
+                            "Bass",
+                            &mut channel.processing.bass_db,
+                            0.0..=9.0,
+                            " dB",
+                        );
+                        slider(
+                            ui,
+                            "Clarity",
+                            &mut channel.processing.clarity_db,
+                            0.0..=6.0,
+                            " dB",
+                        );
+                        slider(
+                            ui,
+                            "Stereo width",
+                            &mut channel.processing.width,
+                            0.0..=2.0,
+                            "×",
+                        );
+                    }
+                    if channel.processing != before {
+                        channel.preset = "Custom".into();
+                    }
+                    if ui.small_button("Reset to neutral").clicked() {
+                        channel.processing = Processing::default();
+                        channel.preset = "Neutral".into();
+                    }
+                });
+            });
         });
         if self.config != before {
             self.dirty = Some(Instant::now());
         }
-        ui.add_space(10.0);
-        ui.label(
-            RichText::new(if input {
-                "Choose “Clearwave Microphone” in your call app after enabling."
-            } else {
-                "Choose “ClearWave Output” in your app or use the routing controls in Advanced."
-            })
-            .small()
-            .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
-        );
     }
+
     fn advanced(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Make it yours.");
-        ui.label(
-            RichText::new("Fine adjustments, routing and background behavior.")
-                .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
-        );
-        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.heading("Make it yours.");
+            information(
+                ui,
+                "About advanced settings",
+                "Fine adjustments, routing and background behavior.",
+            );
+        });
+        ui.add_space(6.0);
         let before = self.config.clone();
-        card(ui).show(ui,|ui|{ui.set_width(ui.available_width());ui.strong("Dynamics & rumble");
-    for(input,channel) in [(false,&mut self.config.output),(true,&mut self.config.input)] {ui.push_id(input,|ui|{ui.label(if input{"Input"}else{"Output"});let old=channel.processing;slider(ui,"Compressor threshold",&mut channel.processing.threshold_db,-48.0..=0.0," dB");slider(ui,"Ratio",&mut channel.processing.ratio,1.0..=10.0,":1");slider(ui,"Low cut",&mut channel.processing.low_cut_hz,0.0..=300.0," Hz");if channel.processing!=old{channel.preset="Custom".into();}});}
-    ui.label(RichText::new("Ratio 1:1 bypasses compression. A linked peak limiter always protects processed samples.").small().color(ui.visuals().widgets.noninteractive.fg_stroke.color));
+        card(ui).show(ui,|ui|{ui.set_width(ui.available_width());ui.horizontal(|ui| {ui.heading("Background & startup");information(ui,"Login options","Login options apply at the next login. Opening the window never starts capture. Apps pinned to a device may need manual selection.");});ui.checkbox(&mut self.config.monitor,"Listen to the processed microphone");picker(ui,"headphones",&self.inventory,DeviceKind::Output,&mut self.config.headphones);ui.label(RichText::new("Explicitly choose headphones to avoid feedback. Monitoring starts only with input.").small().color(ui.visuals().widgets.noninteractive.fg_stroke.color));
+    ui.checkbox(&mut self.config.background,"Keep audio running when this window closes");
+    ui.horizontal(|ui| {
+    let mut login=self.status.autostart.enabled;
+    if ui.add_enabled(!self.busy,egui::Checkbox::new(&mut login,"Start ClearWave when I log in")).changed(){self.submit(Request::SetAutostart{enabled:login});}
+    if self.status.autostart.enabled || self.status.autostart.message=="Login startup is off" {information(ui,"Login startup details",&self.status.autostart.message);} else {ui.colored_label(ui.visuals().warn_fg_color,&self.status.autostart.message);}
+    });
+    ui.checkbox(&mut self.config.startup.output,"Start saved output processing at login");
+    ui.checkbox(&mut self.config.startup.microphone,"Start saved microphone at login (captures without opening the window)");
+    ui.add_enabled_ui(self.config.startup.output,|ui|{ui.checkbox(&mut self.config.startup.default_output,"Use processed output as system default at login");});
+    ui.add_enabled_ui(self.config.startup.microphone,|ui|{ui.checkbox(&mut self.config.startup.default_input,"Use processed microphone as system default at login");});
+
+    if !self.status.tray_available {ui.colored_label(ui.visuals().warn_fg_color,"No visible tray host is available. Background audio remains controllable through this window and the CLI.");}
+
   });
         ui.add_space(10.0);
-        card(ui).show(ui,|ui|{ui.set_width(ui.available_width());ui.strong("Monitoring & background");ui.checkbox(&mut self.config.monitor,"Listen to the processed microphone");picker(ui,"headphones",&self.inventory,DeviceKind::Output,&mut self.config.headphones);ui.label(RichText::new("Explicitly choose headphones to avoid feedback. Monitoring starts only with input.").small().color(ui.visuals().widgets.noninteractive.fg_stroke.color));
-    ui.checkbox(&mut self.config.background,"Keep audio running when this window closes");ui.label(RichText::new("Opening ClearWave never starts microphone capture. Login service setup is opt-in; see README.").small().color(ui.visuals().widgets.noninteractive.fg_stroke.color));
+        card(ui).show(ui,|ui|{ui.set_width(ui.available_width());ui.horizontal(|ui| {ui.heading("Dynamics & rumble");information(ui,"Dynamics help","Ratio 1:1 bypasses compression. A linked peak limiter always protects processed samples.");});
+    for(input,channel) in [(false,&mut self.config.output),(true,&mut self.config.input)] {ui.push_id(input,|ui|{ui.label(if input{"Input"}else{"Output"});let old=channel.processing;slider(ui,"Compressor threshold",&mut channel.processing.threshold_db,-48.0..=0.0," dB");slider(ui,"Ratio",&mut channel.processing.ratio,1.0..=10.0,":1");slider(ui,"Low cut",&mut channel.processing.low_cut_hz,0.0..=300.0," Hz");if channel.processing!=old{channel.preset="Custom".into();}});}
+
   });
         ui.add_space(10.0);
         card(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.strong("Save a preset");
+            ui.heading("Save a preset");
             ui.text_edit_singleline(&mut self.preset_name);
             ui.horizontal_wrapped(|ui| {
                 for input in [false, true] {
@@ -444,11 +501,11 @@ impl App {
             self.dirty = Some(Instant::now());
         }
         ui.add_space(10.0);
-        card(ui).show(ui,|ui|{ui.set_width(ui.available_width());ui.strong("Routing & diagnostics");ui.label(format!("Audio server: {}",self.inventory.backend));
+        card(ui).show(ui,|ui|{ui.set_width(ui.available_width());ui.heading("Routing & diagnostics");ui.label(format!("Audio server: {}",self.inventory.backend));
     ui.add_enabled_ui(!self.busy,|ui|{ui.horizontal_wrapped(|ui|{if ui.add_enabled(self.status.output.running,egui::Button::new("Use processed output by default")).clicked(){self.flush();self.submit(Request::MakeDefault{input:false});}
     if ui.add_enabled(self.status.input.running,egui::Button::new("Use processed input by default")).clicked(){self.flush();self.submit(Request::MakeDefault{input:true});}});
     if ui.button("Refresh devices").clicked(){self.submit(Request::Devices);}});
-    ui.label(RichText::new("Defaults restore on stop only while still owned by ClearWave. Existing apps may need explicit selection or restart.").small().color(ui.visuals().widgets.noninteractive.fg_stroke.color));
+    information(ui,"More information","Defaults restore on stop only while still owned by ClearWave. Existing apps may need explicit selection or restart.");
     ui.label(format!("Microphone clipped samples: {}",self.status.input.clipped_samples));ui.label(RichText::new("Physical input clipping cannot be repaired. Lower hardware microphone volume in your system mixer; processed gain is separate.").small().color(ui.visuals().warn_fg_color));
     if !self.status.output_route.is_empty(){ui.label(format!("Output route: {}",self.status.output_route));}
     if !self.status.input_route.is_empty(){ui.label(format!("Input route: {}",self.status.input_route));}
@@ -458,6 +515,17 @@ impl App {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut activation = [0_u8; 16];
+        while let Ok(n) = self.activation.recv(&mut activation) {
+            if &activation[..n] == b"quit" {
+                self.closed = true;
+                let _ = self.jobs.send(Job::Close(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
         self.poll();
         self.theme.poll();
         apply_theme(ctx, &self.theme);
@@ -545,7 +613,7 @@ impl eframe::App for App {
             .frame(
                 egui::Frame::new()
                     .fill(ctx.style().visuals.panel_fill)
-                    .inner_margin(24),
+                    .inner_margin(18),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -561,9 +629,8 @@ impl eframe::App for App {
                             egui::Stroke::new(2.5_f32, ui.visuals().selection.stroke.color),
                         );
                     }
-                    ui.label(RichText::new("ClearWave").size(25.0).strong());
-                });
-                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("ClearWave").size(28.0).strong());
+                    ui.add_space((ui.available_width() - 350.0).max(16.0));
                     ui.label("Theme");
                     let mut selected = self.theme.selected_id().to_owned();
                     let name = if selected == FOLLOW_OMARCHY {
@@ -635,14 +702,12 @@ impl eframe::App for App {
                     if self.busy {
                         ui.spinner();
                     }
-                });
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
                     ui.selectable_value(&mut self.page, Page::Output, "Output");
                     ui.selectable_value(&mut self.page, Page::Input, "Input");
                     ui.selectable_value(&mut self.page, Page::Advanced, "Advanced");
                 });
-                ui.add_space(12.0);
+                ui.add_space(6.0);
                 if (!self.ready || self.error.is_some()) && ui.button("Retry connection").clicked()
                 {
                     let _ = self.jobs.send(Job::Reconnect);
@@ -698,7 +763,6 @@ fn worker(jobs: mpsc::Receiver<Job>, events: mpsc::Sender<Event>, ctx: egui::Con
         ctx.request_repaint();
     };
     let initialize = || -> anyhow::Result<()> {
-        engine::ensure_running()?;
         if let Some(s) = engine::request(&Request::Status)?.status {
             send(Event::Initial(s));
         }
@@ -808,8 +872,8 @@ fn slider(
 fn card(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::new()
         .fill(ui.visuals().window_fill)
-        .inner_margin(18)
-        .corner_radius(12)
+        .inner_margin(14)
+        .corner_radius(2)
         .stroke(egui::Stroke::new(1.0_f32, ui.visuals().window_stroke.color))
 }
 fn meter(ui: &mut egui::Ui, label: &str, peak: f32) {
@@ -866,6 +930,10 @@ fn apply_theme(ctx: &egui::Context, theme: &ThemeManager) {
     };
     let color =
         |f: fn(&clearwave::theme::Palette) -> clearwave::theme::Rgb| theme.blend(f).to_color32();
+    v.window_corner_radius = egui::CornerRadius::same(2);
+    v.menu_corner_radius = egui::CornerRadius::same(2);
+    v.window_shadow = egui::epaint::Shadow::NONE;
+    v.popup_shadow = egui::epaint::Shadow::NONE;
     v.panel_fill = color(|p| p.background);
     v.window_fill = color(|p| p.surface);
     v.extreme_bg_color = color(|p| p.background);
@@ -884,6 +952,7 @@ fn apply_theme(ctx: &egui::Context, theme: &ThemeManager) {
         &mut v.widgets.active,
         &mut v.widgets.open,
     ] {
+        widget.corner_radius = egui::CornerRadius::same(2);
         widget.bg_fill = color(|p| p.surface);
         widget.weak_bg_fill = color(|p| p.surface);
         widget.fg_stroke.color = color(|p| p.text);
@@ -910,4 +979,66 @@ fn apply_theme(ctx: &egui::Context, theme: &ThemeManager) {
     v.widgets.active.bg_stroke.color = color(|p| p.accent);
     v.widgets.noninteractive.fg_stroke.color = color(|p| p.secondary);
     ctx.set_visuals(v);
+}
+
+/// Match the user's configured terminal font without changing the desktop or installing fonts.
+fn configure_typography(ctx: &egui::Context) {
+    if let Ok(output) = std::process::Command::new("fc-match")
+        .args(["-f", "%{file}", "monospace"])
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(path) = std::str::from_utf8(&output.stdout) {
+                if let Ok(data) = std::fs::read(path.trim()) {
+                    if data.len() <= 16 * 1024 * 1024 {
+                        let mut fonts = egui::FontDefinitions::default();
+                        fonts.font_data.insert(
+                            "system-monospace".into(),
+                            egui::FontData::from_owned(data).into(),
+                        );
+                        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace]
+                        {
+                            fonts
+                                .families
+                                .entry(family)
+                                .or_default()
+                                .insert(0, "system-monospace".into());
+                        }
+                        ctx.set_fonts(fonts);
+                    }
+                }
+            }
+        }
+    }
+    ctx.style_mut(|style| {
+        for (kind, font) in &mut style.text_styles {
+            font.size = if *kind == egui::TextStyle::Heading {
+                20.0
+            } else {
+                14.0
+            };
+            font.family = egui::FontFamily::Monospace;
+        }
+    });
+}
+/// Hover help also opens on click or keyboard activation for accessibility.
+fn information(ui: &mut egui::Ui, label: &str, text: &str) {
+    ui.push_id((label, text), |ui| {
+        let id = ui.make_persistent_id("information");
+        let response = ui.add(egui::Button::new("i").small()).on_hover_text(text);
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        if response.clicked() {
+            ui.memory_mut(|memory| memory.toggle_popup(id));
+        }
+        egui::popup_below_widget(
+            ui,
+            id,
+            &response,
+            egui::PopupCloseBehavior::CloseOnClickOutside,
+            |ui| {
+                ui.set_max_width(340.0);
+                ui.label(text);
+            },
+        );
+    });
 }

@@ -83,10 +83,11 @@ the processing cards. Main content and Advanced settings scroll vertically.
   are covered by deterministic DSP/mock tests, not a physical capture session.
 - PulseAudio proper was not available for a separate real-server test; its command
   protocol is used and PipeWire-Pulse was exercised.
-- AppImage assembly/download and desktop/service installation were not executed;
-  their scripts/templates were checked without changing installed configuration.
-- The 520×620 logical minimum uses scrolling by design, but this exact minimum
-  was not separately captured. Screenshots show the default window size.
+- Desktop/service installation was not executed. AppImage assembly and smoke
+  tests were completed in the 2026-11-18 follow-up below, without changing installed
+  configuration.
+- The minimum-size view uses scrolling by design. The 520×620 logical light
+  appearance was captured during the 2026-11-18 follow-up below.
 - SIGKILL/power loss cannot run owned-resource cleanup. Startup detects singleton
   ownership/stale sockets but does not automatically reap modules left by a prior
   forcibly killed process. Normal exit/signals and tested startup failures clean up.
@@ -101,3 +102,72 @@ Theme support was completed after Antigravity's partial implementation. See
 checks, screenshot evidence and remaining manual verification. The final theme
 build passes 47 default-feature tests and 30 CLI-only tests. Appearance-only
 configuration preserves both active audio routes without updating DSP controls.
+
+
+## Tray, login startup and interface — 2026-11-18
+
+Implementation: engine-owned ksni 0.3.3 SNI/DBusMenu, bounded menu command queue,
+GUI singleton/activation endpoint and explicit shutdown notification. XDG login
+startup is reversible and separate from saved default-off processing/default
+routing consent. GLib launcher testing found that literal percent signs in argv0
+need a shell-free `/usr/bin/env` prefix; startup and desktop installation now
+handle that case. Symlink/user-edited conflicts and existing temporary files are
+preserved. `APPIMAGE` records the original image path.
+
+Validation performed:
+
+- `cargo fmt --check`, locked strict all-target Clippy, default and headless suites
+  passed. Parent review recorded 54 default and 36 headless checks. Added lifecycle
+  coverage uses generated mock audio for startup once-only behavior, missing saved
+  devices, late server readiness, retry cancellation and explicit default consent.
+- `dbus-run-session -- /usr/bin/python3 scripts/test-private-tray.py` passed on
+  the desktop binary and packaged AppImage: watcher without host reports unavailable;
+  one active service registers when the host appears; DBusMenu toggles login startup
+  only in a temporary XDG directory without capture; independent output/input controls,
+  watcher restart, StopAll cleanup and Quit/GUI notification all pass.
+- `/usr/bin/python3 scripts/test-autostart-exec.py target/release/clearwave` passed
+  actual GLib Desktop Entry launch with spaces, quotes, percent signs, dollar signs,
+  backticks and backslashes. A moved original AppImage path remains disableable.
+- `desktop-file-validate`, shell syntax, Python script parsing and `git diff --check`
+  passed. The AppImage's temporary startup entry also passed desktop-file validation.
+- `./scripts/build-appimage.sh` built the optimized release and AppImage. All 227
+  selected dependency notices are collected, including ksni's UNLICENSE. The image
+  includes original PNG/SVG app art and symbolic status icons. Tool/runtime downloads
+  are cached and bounded; no installation was performed. Appimagetool reports only
+  optional AppStream metadata/tool absence.
+- AppImage extraction-mode `--help`, temporary-XDG enable/status/disable and original
+  `APPIMAGE` target checks passed. Packaged tray lifecycle passed with generated audio.
+  This verifies the local image; it does not establish compatibility across distros.
+
+Parent live review used only laptop `eDP-1`, second workspace `2`; Acer `HDMI-A-1`
+remained on workspace `11`. The real Omarchy tray retained the test daemon after
+GUI close; independent controls, StopAll and Quit worked with mock audio, including
+Quit closing a visible window without respawn. Native close/reopen preserved one
+control window. Active dark and light themes plus 520×620 logical size were captured.
+System font is discovered through Fontconfig (here JetBrainsMono Nerd Font), with
+14 logical px ordinary text and larger headings. Compact wide layout keeps the
+main device/meter and EQ/effects controls visible. See [DESIGN.md](../DESIGN.md).
+
+No real startup files, desktop configuration, installed application or live audio
+were changed. Physical microphone listening/hardware tests remain outside this
+follow-up. Wayland compositor focus policy can still decline foreground focus;
+activation uses native GUI focus requests and no compositor-specific commands.
+
+Final review confirmed the packaged binary matches `dist/clearwave` byte-for-byte.
+The final image passed the private tray lifecycle test again, and the release
+binary passed the GLib autostart test. Test windows and the isolated daemon were
+removed; read-only desktop verification found laptop workspace 1 and Acer
+workspace 11 afterward.
+
+Updated native screenshots: [Output](screenshots/output.png),
+[Input](screenshots/input.png), [Advanced](screenshots/advanced.png). These show
+generated test devices and the system's active Ayu Dark palette. Light-theme
+minimum-size captures are temporary review artifacts under
+`/tmp/clearwave-desktop-review-v6062pw4/captures-light/`.
+
+Final local build SHA-256:
+
+```text
+75971e9188b4a8f9a7416f9b821eb058eecc558b4feb657681b1da0e63f9bd79  dist/clearwave
+b3ec5ee75955a38cbe6d5192de493cb27d33a7993a2be3c608e3ced8a5321d63  dist/Clearwave-x86_64.AppImage
+```

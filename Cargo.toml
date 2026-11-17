@@ -7,7 +7,8 @@ license = "MIT"
 
 [features]
 default = ["gui"]
-gui = ["dep:eframe", "dep:image"]
+gui = ["dep:eframe", "dep:image", "tray"]
+tray = ["dep:ksni"]
 
 [dependencies]
 anyhow = "1.0"
@@ -19,6 +20,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 libc = "0.2"
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+ksni = { version = "=0.3.3", features = ["blocking"], optional = true }
 
 [profile.release]
 lto = "thin"

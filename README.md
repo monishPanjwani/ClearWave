@@ -159,17 +159,58 @@ clients should use bounded connection/read/write timeouts. Separate foreground
 `./scripts/install-desktop.sh` builds, installs to
 `${XDG_DATA_HOME:-$HOME/.local/share}/clearwave/clearwave`, and adds a launcher.
 Run it only when you want that persistent installation. `./scripts/build-appimage.sh`
-builds an x86_64 AppImage, downloading appimagetool if `APPIMAGETOOL` is not supplied.
+builds an x86_64 AppImage. `APPIMAGETOOL` and `APPIMAGE_RUNTIME` can point to
+existing tooling/runtime files; otherwise bounded downloads are cached in `dist/`.
 The AppImage still needs the host audio client tools and a working desktop GL/audio
 session. AppImage packaging is separate from validation of the Rust release build.
 
-`packaging/clearwave.service` is an **uninstalled** user-service template. To opt in,
-copy it to `~/.config/systemd/user/`, adjust ExecStart for your install path, then
-run `systemctl --user daemon-reload` and
-`systemctl --user enable --now clearwave.service`. It starts only the idle daemon,
-not microphone capture. Disable with
-`systemctl --user disable --now clearwave.service`. Do not run a service and a second
-manual daemon intentionally; the singleton lock rejects the second instance.
+The daemon owns a StatusNotifierItem/DBusMenu tray indicator. Idle, processing and
+error use different glyphs; the tooltip reports actual output/microphone state.
+The tray offers Open, independent Start/Stop, Stop all processing, login startup
+and Quit. Stop all retains an idle daemon; Quit closes its window, restores owned
+defaults and exits without restarting. Reopening the GUI raises the existing
+window when available; compositor focus policy may prevent foreground focus.
+
+A compatible SNI tray host is required. Omarchy may put unpinned indicators in
+the tray drawer; pin ClearWave using the panel's controls. GNOME may require an
+AppIndicator extension. No host is installed automatically. Advanced reports when
+the tray is unavailable; use GUI or `clearwave engine stop-all` / `engine shutdown`.
+Host restarts and session bus loss do not stop audio; the indicator reconnects.
+
+Advanced → Background & startup offers **Start ClearWave when I log in**. This
+writes only `$XDG_CONFIG_HOME/autostart/clearwave.desktop` (default
+`~/.config/autostart/clearwave.desktop`), with an absolute executable path. It runs
+at graphical login, not machine boot. The installed Omarchy/UWSM session consumes
+XDG autostart; other sessions must provide an XDG autostart runner. No Hyprland
+config or shell hooks are modified. Enabling/disabling changes future logins only.
+
+Automatic output and microphone processing are **separate, default-off choices**.
+Microphone startup captures the saved microphone without opening a window. Save
+the intended device first: startup never substitutes a different microphone.
+Separate checkboxes allow temporarily selecting processed input/output as system
+defaults, only after each pipeline starts. Applications retaining explicit device
+choices may need manual selection. Readiness retries stop after about 40 seconds;
+Stop cancels pending retries. Duplicate startup invocations in the same session
+never restart deliberately stopped processing, even after Quit.
+
+CLI equivalents: `clearwave autostart status`, `autostart enable`,
+`autostart disable`, `autostart repair`. `clearwave startup` applies saved policy
+once for the session without a window. Startup preferences are independent of
+window-close behavior. Existing settings load with all automatic processing off.
+
+Use a stable installed binary or AppImage location. AppImage startup records the
+original `APPIMAGE` path, never the temporary mount. After moving an executable,
+enable again or run `autostart repair`; the desktop installer repairs an existing
+unmodified app-owned entry without enabling a new one. Edited entries and
+unrelated files are preserved and reported as conflicts. Disable startup before
+uninstalling, then remove the installed launcher/binary/icons/docs as desired.
+
+`packaging/clearwave.service` remains an **uninstalled legacy idle-only template**.
+If already enabled, explicitly disable it (`systemctl --user disable clearwave.service`)
+before enabling XDG startup; ClearWave refuses two startup owners. It never silently
+disables user services. The template uses Restart=on-failure, so intentional Quit
+exits successfully and remains stopped. Custom units using Restart=always must be
+changed by their owner if they should honor Quit.
 
 ## Development and verification
 
@@ -178,6 +219,9 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo test --locked --no-default-features
+cargo build --locked
+dbus-run-session -- /usr/bin/python3 scripts/test-private-tray.py
+/usr/bin/python3 scripts/test-autostart-exec.py
 cargo build --release --locked
 bash -n scripts/build.sh scripts/build-appimage.sh scripts/install-desktop.sh
 ```
@@ -219,3 +263,13 @@ location. The GUI checks for replacement every two seconds while following; it
 keeps the last valid palette during missing/invalid updates and shows a fallback
 notice. Closing the GUI stops theme checks while background audio continues.
 Palette changes crossfade over 250 ms and never restart processing or capture.
+
+`src/tray.rs` owns the desktop indicator; `src/autostart.rs` owns reversible login
+files; `src/settings.rs` separates saved login policy from runtime state.
+The private tray test requires dbus-run-session, python3-dbus and python3-gi and
+uses only temporary XDG paths and generated mock audio.
+
+The interface discovers the system monospace font using Fontconfig, with egui's
+bundled font as a fallback. Normal text, buttons and tooltips use 14 logical px;
+headings are larger. Secondary explanations are behind keyboard/click accessible
+information buttons with hover help. Capture consent and errors remain visible.

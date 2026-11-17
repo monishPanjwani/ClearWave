@@ -7,3 +7,7 @@ pub mod enhance;
 pub mod settings;
 #[cfg(feature = "gui")]
 pub mod theme;
+
+pub mod autostart;
+#[cfg(feature = "tray")]
+pub mod tray;

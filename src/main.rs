@@ -27,6 +27,13 @@ enum Command {
     Open,
     /// Run the per-user background engine (never starts capture automatically).
     Daemon,
+    /// Apply saved login processing policy once per graphical session, without a window.
+    Startup,
+    /// Inspect or explicitly change XDG login startup (does not start audio).
+    Autostart {
+        #[command(subcommand)]
+        action: AutostartAction,
+    },
     /// Inspect or control the background engine.
     Engine {
         #[command(subcommand)]
@@ -77,6 +84,14 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum AutostartAction {
+    Status,
+    Enable,
+    Disable,
+    Repair,
+}
+
+#[derive(Debug, Subcommand)]
 enum EngineAction {
     /// Apply a validated versioned JSON settings file (never starts capture).
     Configure {
@@ -91,6 +106,7 @@ enum EngineAction {
         #[arg(long)]
         input: bool,
     },
+    StopAll,
     Shutdown,
 }
 
@@ -125,6 +141,20 @@ fn main() {
 
 fn execute(args: Args) -> Result<()> {
     match args.command.unwrap_or(Command::Open) {
+        Command::Autostart { action } => {
+            match action {
+                AutostartAction::Status => {}
+                AutostartAction::Enable => clearwave::autostart::set(true)?,
+                AutostartAction::Disable => clearwave::autostart::set(false)?,
+                AutostartAction::Repair => clearwave::autostart::repair()?,
+            }
+            print_value(&clearwave::autostart::inspect(), args.json)
+        }
+        Command::Startup => {
+            clearwave::engine::ensure_running()?;
+            clearwave::engine::request(&clearwave::engine::Request::Startup)?;
+            Ok(())
+        }
         Command::Daemon => clearwave::engine::run_daemon(),
         Command::Engine { action } => {
             use clearwave::engine::{self, Request};
@@ -135,6 +165,7 @@ fn execute(args: Args) -> Result<()> {
                 },
                 EngineAction::Start { input } => Request::Start { input },
                 EngineAction::Stop { input } => Request::Stop { input },
+                EngineAction::StopAll => Request::StopAll,
                 EngineAction::Shutdown => Request::Shutdown,
             };
             print_value(&engine::request(&request)?, args.json)

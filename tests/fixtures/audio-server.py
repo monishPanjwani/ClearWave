@@ -23,6 +23,8 @@ with (root/'state.lock').open('a') as lock:
     fcntl.flock(lock,fcntl.LOCK_EX)
     path=root/'state.json'
     state=json.loads(path.read_text()) if path.exists() else {'modules':{},'next':100,'default_source':'mic','default_sink':'speakers'}
+    if (root/'server-unavailable').exists():
+        print('Mock server not ready',file=sys.stderr);sys.exit(1)
     args=sys.argv[1:]
     if args and args[0]=='--format=json':args=args[1:]
     result=''

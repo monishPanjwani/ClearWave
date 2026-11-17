@@ -1,4 +1,5 @@
-//! Versioned, validated configuration. No enabled/capture state is persisted.
+//! Versioned, validated configuration. Runtime capture state is never persisted;
+//! login capture policy requires separate explicit consent.
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -117,6 +118,15 @@ pub struct SavedPreset {
     pub input: bool,
     pub processing: Processing,
 }
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StartupPolicy {
+    pub output: bool,
+    pub microphone: bool,
+    pub default_output: bool,
+    pub default_input: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -126,6 +136,7 @@ pub struct Config {
     pub monitor: bool,
     pub headphones: String,
     pub background: bool,
+    pub startup: StartupPolicy,
     pub presets: Vec<SavedPreset>,
     /// Optional theme identifier. `None` means first-launch auto-detect.
     /// `"follow-omarchy"` follows the active Omarchy palette. Any other
@@ -147,6 +158,7 @@ impl Default for Config {
             monitor: false,
             headphones: String::new(),
             background: false,
+            startup: StartupPolicy::default(),
             presets: Vec::new(),
             theme: None,
         }
@@ -281,6 +293,7 @@ mod appearance_tests {
     fn old_settings_and_theme_validation() {
         let old: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(old.theme, None);
+        assert_eq!(old.startup, StartupPolicy::default());
         let mut c = old;
         c.theme = Some("catppuccin-latte".into());
         let copy: Config = serde_json::from_slice(&serde_json::to_vec(&c).unwrap()).unwrap();

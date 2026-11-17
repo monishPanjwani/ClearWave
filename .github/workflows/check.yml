@@ -13,13 +13,17 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Linux build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev dbus-x11 python3-dbus python3-gi desktop-file-utils
       - run: cargo fmt --check
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test Linux CLI without GUI dependencies
         run: cargo test --locked --no-default-features
       - run: cargo build --release --locked
+      - name: Private tray protocol and mock audio
+        run: dbus-run-session -- /usr/bin/python3 scripts/test-private-tray.py target/release/clearwave
+      - run: desktop-file-validate packaging/clearwave.desktop
+      - run: /usr/bin/python3 scripts/test-autostart-exec.py target/release/clearwave
       - uses: actions/upload-artifact@v4
         with:
           name: clearwave-linux

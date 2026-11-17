@@ -8,6 +8,8 @@ python3 - <<'PY'
 from pathlib import Path
 import os
 import tempfile
+import shutil
+import subprocess
 
 root = Path.cwd()
 data = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share')
@@ -36,9 +38,21 @@ command = str(binary).replace('%', '%%')
 command = ''.join('\\' + c if c in '\\"`$' else c for c in command)
 command = command.replace('\\', '\\\\')
 entry = (root / 'packaging/clearwave.desktop').read_text()
-entry = entry.replace('Exec=clearwave open', 'Exec="' + command + '" open')
+prefix = '/usr/bin/env ' if '%' in str(binary) else ''
+entry = entry.replace('Exec=clearwave open', 'Exec=' + prefix + '"' + command + '" open')
 destination = applications / 'clearwave.desktop'
 atomic_write(destination, entry.encode(), 0o644)
+icons = data / 'icons/hicolor/scalable/status'
+icons.mkdir(parents=True, exist_ok=True)
+for icon in (root / 'assets/tray').glob('*.svg'):
+    atomic_write(icons / icon.name, icon.read_bytes(), 0o644)
+docs = app_dir / 'doc'
+docs.mkdir(exist_ok=True)
+for name in ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'README.md']:
+    atomic_write(docs / name, (root / name).read_bytes(), 0o644)
+shutil.copytree(root / 'dist/licenses', docs / 'licenses', dirs_exist_ok=True)
+# Repair an existing app-owned login entry, never enable one merely by installing.
+subprocess.run([str(binary), 'autostart', 'repair'], check=True)
 print(f'Installed {binary}')
 print(f'Installed {destination}')
 PY

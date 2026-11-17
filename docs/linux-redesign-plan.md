@@ -1,5 +1,13 @@
 # ClearWave Linux redesign execution plan
 
+## Next feature — background visibility and login startup
+
+The 2026-11-18 request is planned in [tray-autostart-plan.md](tray-autostart-plan.md):
+an engine-owned cross-desktop tray, Open/Stop/Quit actions, reversible login-start
+integration, and explicit automatic input/output processing choices. This phase is
+not implemented yet. All visible tests must use the laptop monitor's second
+workspace, leaving the Acer workspace untouched.
+
 ## Execution result — 2026-11-16
 
 Implemented by a delegated `gpt-6.1-sol` workhorse and reviewed by the parent agent. Linux input/output sessions, independent background engine, three-page UI, live DSP controls, settings/custom presets, and Linux-only packaging are implemented. The chosen DSP is original Rust based on documented equations, not a translation of FxSound. See `THIRD_PARTY_NOTICES.md` for inspected upstream files and differences, and `docs/validation.md` for checks and remaining manual tests.
